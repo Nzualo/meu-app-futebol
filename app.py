@@ -6,7 +6,6 @@ import pandas as pd
 # 1. Configuração Inicial
 st.set_page_config(page_title="Scanner Betway MZ", layout="wide", page_icon="⚽")
 
-# Estilo CSS para parecer um app profissional
 st.markdown("""
     <style>
     .main { background-color: #1a1a1a; color: white; }
@@ -14,86 +13,74 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. Função para capturar dados (Scraper)
-def get_betway_data():
-    scraper = cloudscraper.create_scraper()
-    url = "https://www.betway.co.mz/sport/soccer" # URL principal
-    
-    try:
-        response = scraper.get(url)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Esta parte busca os blocos de jogos (as classes podem variar na Betway)
-        # Vamos criar um simulador de dados caso o scraper seja bloqueado temporariamente
-        eventos = []
-        
-        # Lógica de extração de exemplo (precisa ser refinada conforme o HTML da Betway)
-        # Se falhar, ele retorna uma lista vazia e usamos a entrada manual
-        return eventos
-    except Exception as e:
-        return None
-
-# 3. Cabeçalho do App
+# 2. Cabeçalho
 st.title("⚽ Smart Predictor - Betway.co.mz")
 st.subheader("Analise odds em tempo real e encontre apostas de valor")
 
-# 4. Interface Lateral (Input)
+# 3. Sidebar e Inputs (Garantindo que as variáveis existam sempre)
 st.sidebar.header("Configurações de Análise")
-modo = st.sidebar.radio("Modo de Análise", ["Manual", "Automático (Beta)"])
+
+# Definindo valores padrão para evitar o NameError
+time_h = "Time Casa"
+time_a = "Time Fora"
+odd_casa = 2.0
+media_gols_h = 1.5
+media_gols_a = 1.0
+
+modo = st.sidebar.radio("Modo de Análise", ["Manual", "Automático (Em breve)"])
 
 if modo == "Manual":
-    st.sidebar.info("Insira os dados da Betway abaixo")
-    time_h = st.text_input("Time da Casa", "Costa do Sol")
-    time_a = st.text_input("Time de Fora", "Black Bulls")
+    time_h = st.text_input("Nome do Time da Casa", "Costa do Sol")
+    time_a = st.text_input("Nome do Time de Fora", "Black Bulls")
     
-    col_input1, col_input2 = st.columns(2)
-    with col_input1:
-        odd_casa = st.number_input("Odd Betway (Vencer Casa)", min_value=1.0, value=2.10)
-        media_gols_h = st.slider("Média de gols (Casa)", 0.0, 5.0, 1.8)
-    with col_input2:
-        odd_fora = st.number_input("Odd Betway (Vencer Fora)", min_value=1.0, value=3.20)
-        media_gols_a = st.slider("Média de gols (Fora)", 0.0, 5.0, 1.2)
+    col_in1, col_in2 = st.columns(2)
+    with col_in1:
+        odd_casa = st.number_input("Odd na Betway (Casa)", min_value=1.01, value=2.10)
+        media_gols_h = st.slider("Média de gols marcados (Casa)", 0.0, 5.0, 1.8)
+    with col_in2:
+        st.write("") # Espaçamento
+        st.write("")
+        media_gols_a = st.slider("Média de gols sofridos (Pelo visitante)", 0.0, 5.0, 1.2)
 
-# 5. O Cérebro (Cálculo de Probabilidade - Poisson/Média)
+# 4. Função de Cálculo
 def calcular_prognostico(gols_h, gols_a):
-    # Modelo simplificado de força de ataque
     total = gols_h + gols_a
-    prob_h = (gols_h / total) * 0.85 # margem de segurança
-    prob_a = (gols_a / total) * 0.85
-    prob_e = 1 - prob_h - prob_a
+    if total == 0: total = 0.01 # Evita divisão por zero
+    
+    prob_h = (gols_h / total) * 0.80 # Margem de erro de 20%
+    if prob_h > 0.95: prob_h = 0.95
+    if prob_h < 0.05: prob_h = 0.05
+    
+    prob_e = 0.25 # Média fixa de empate para simplificar
+    prob_a = 1 - prob_h - prob_e
     
     return prob_h, prob_e, prob_a
 
+# 5. Execução do Cálculo (Agora sem erro!)
 p_h, p_e, p_a = calcular_prognostico(media_gols_h, media_gols_a)
 odd_justa_h = 1 / p_h
 
-# 6. Exibição dos Resultados
+# 6. Resultados Visuais
 st.divider()
-st.header(f"Prognóstico: {time_h} vs {time_a}")
+st.header(f"Análise: {time_h} vs {time_a}")
 
 c1, c2, c3 = st.columns(3)
 
 with c1:
-    valor = odd_casa > odd_justa_h
-    st.metric("Odd Justa (Calculada)", f"{odd_justa_h:.2f}")
-    if valor:
-        st.success("✅ HÁ VALOR NA CASA")
+    st.metric("Nossa Odd Justa", f"{odd_justa_h:.2f}")
+    if odd_casa > odd_justa_h:
+        st.success("✅ TEM VALOR")
     else:
         st.error("❌ SEM VALOR")
 
 with c2:
-    st.metric("Probabilidade de Vitória", f"{p_h*100:.1f}%")
+    st.metric("Probabilidade Vitória", f"{p_h*100:.1f}%")
 
 with c3:
-    st.metric("Margem de Lucro Est.", f"{((odd_casa/odd_justa_h)-1)*100:.1f}%")
+    vantagem = ((odd_casa / odd_justa_h) - 1) * 100
+    st.metric("Vantagem (Value)", f"{vantagem:.1f}%")
 
-# 7. Sugestão Final
-st.divider()
-if valor and p_h > 0.5:
-    st.warning(f"🚩 Dica de Aposta: Vitória do {time_h} tem valor estatístico na Betway.")
-elif p_h + p_a > 0.7:
-    st.info("🚩 Dica de Aposta: Mercado de 'Ambas Marcam' parece provável.")
-else:
-    st.write("Aguarde por melhores oportunidades neste jogo.")
-
-st.caption("Aviso: Apostas envolvem risco. Use este software apenas como ferramenta de auxílio.")
+# Dica Final
+if odd_casa > odd_justa_h:
+    st.balloons()
+    st.info(f"Dica: A odd da Betway ({odd_casa}) está mais alta que o risco ({odd_justa_h:.2f}). Boa oportunidade!")
