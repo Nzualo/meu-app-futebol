@@ -1,76 +1,69 @@
 import streamlit as st
-import cloudscraper
-from bs4 import BeautifulSoup
+import pandas as pd
 
-# 1. Configuração
-st.set_page_config(page_title="Scanner Betway MZ", layout="wide", page_icon="⚽")
+# Configuração da página
+st.set_page_config(page_title="Scanner Geral Betway", layout="wide")
 
-# 2. Função Scraper para o Link
-def extrair_dados_betway(url):
-    try:
-        scraper = cloudscraper.create_scraper()
-        res = scraper.get(url)
-        soup = BeautifulSoup(res.text, 'html.parser')
+st.title("📋 Scanner de Oportunidades - Betway MZ")
+st.write("Análise rápida de múltiplos jogos para encontrar as melhores entradas do dia.")
+
+# --- ENTRADA DE DADOS EM MASSA ---
+st.subheader("1. Inserir Jogos do Dia")
+st.info("Dica: Você pode copiar dados de uma tabela ou preencher abaixo.")
+
+# Criando uma tabela editável para análise rápida
+data = {
+    "Jogo": ["Costa do Sol vs Black Bulls", "Fer. Maputo vs Textáfrica", "Real Madrid vs Mallorca", "Man City vs Arsenal"],
+    "Odd Betway (1)": [2.10, 1.50, 1.30, 1.85],
+    "Força Casa (0-10)": [7, 8, 9, 8],
+    "Força Fora (0-10)": [6, 3, 4, 8]
+}
+df_inicial = pd.DataFrame(data)
+
+# Tabela editável onde você pode mudar os nomes e odds rapidamente
+df_usuario = st.data_editor(df_inicial, num_rows="dynamic", use_container_width=True)
+
+# --- BOTÃO DE PROCESSAMENTO GERAL ---
+if st.button("🔍 ANALISAR TODOS OS JOGOS"):
+    
+    # Lógica de Cálculo em Massa
+    def calcular_valor(row):
+        # Cálculo de probabilidade baseada na força relativa (0-10)
+        total_forca = row["Força Casa (0-10)"] + row["Força Fora (0-10)"]
+        prob_casa = row["Força Casa (0-10)"] / total_forca
+        odd_justa = 1 / (prob_casa * 0.9) # 0.9 é a margem de segurança
         
-        # Tentativa de pegar o nome dos times no título da página
-        titulo = soup.title.string if soup.title else ""
-        nome_jogo = titulo.replace("Betway", "").strip()
-        
-        return nome_jogo
-    except:
-        return None
+        valor = row["Odd Betway (1)"] - odd_justa
+        return round(odd_justa, 2), round(valor, 2)
 
-# 3. Cabeçalho
-st.title("⚽ Smart Predictor - Betway.co.mz")
+    # Aplicando o cálculo na tabela
+    df_usuario[['Odd Justa', 'Margem Valor']] = df_usuario.apply(
+        lambda row: pd.Series(calcular_valor(row)), axis=1
+    )
 
-# 4. Campo de Link
-st.info("Copie o link do jogo na Betway e cole abaixo para analisar")
-link_betway = st.text_input("Link do Jogo (ex: https://www.betway.co.mz/sport/soccer/...)")
+    # --- RESULTADOS ---
+    st.divider()
+    st.subheader("📊 Ranking de Melhores Apostas")
+    
+    # Colorindo a tabela para facilitar a visão
+    def colorir_valor(val):
+        color = 'green' if val > 0 else 'red'
+        return f'color: {color}'
 
-if link_betway:
-    with st.spinner('Analisando link da Betway...'):
-        info_jogo = extrair_dados_betway(link_betway)
-        if info_jogo:
-            st.write(f"🎮 Jogo detectado: **{info_jogo}**")
+    df_final = df_usuario.sort_values(by="Margem Valor", ascending=False)
+    st.dataframe(df_final.style.applymap(colorir_valor, subset=['Margem Valor']), use_container_width=True)
 
-st.divider()
+    # Resumo Rápido
+    melhor_jogo = df_final.iloc[0]
+    st.success(f"💎 **Melhor Oportunidade:** {melhor_jogo['Jogo']} com margem de {melhor_jogo['Margem Valor']}")
 
-# 5. Entradas de Dados (Ajustado)
-col_in1, col_in2 = st.columns(2)
+else:
+    st.info("Ajuste as Forças e as Odds na tabela acima e clique em Analisar.")
 
-with col_in1:
-    st.subheader("📊 Dados do Mercado")
-    time_h = st.text_input("Time da Casa", "Costa do Sol")
-    odd_casa = st.number_input("Odd na Betway (Vencer Casa)", min_value=1.01, value=2.10)
-
-with col_in2:
-    st.subheader("📈 Nossa Estatística")
-    media_gols_h = st.slider("Força de Ataque (Casa)", 0.0, 5.0, 1.8)
-    media_gols_a = st.slider("Fraqueza de Defesa (Visitante)", 0.0, 5.0, 1.2)
-
-# 6. Lógica de Cálculo
-def calcular_prognostico(g_h, g_a):
-    prob_h = (g_h / (g_h + g_a)) * 0.82 if (g_h + g_a) > 0 else 0.5
-    return prob_h
-
-prob_vitoria = calcular_prognostico(media_gols_h, media_gols_a)
-odd_justa = 1 / prob_vitoria
-
-# 7. Resultados
-st.divider()
-res1, res2 = st.columns(2)
-
-with res1:
-    st.metric("Nossa Odd Justa", f"{odd_justa:.2f}")
-    if odd_casa > odd_justa:
-        st.success("✅ APOSTA COM VALOR")
-        st.balloons()
-    else:
-        st.error("❌ SEM VALOR AGORA")
-
-with res2:
-    st.metric("Probabilidade Real", f"{prob_vitoria*100:.1f}%")
-    vantagem = ((odd_casa / odd_justa) - 1) * 100
-    st.write(f"**Sua vantagem sobre a Betway:** {vantagem:.1f}%")
-
-st.caption("Dica: Se colar o link e os nomes não mudarem, preencha manualmente os nomes e as odds.")
+st.markdown("""
+---
+**Como usar rápido:**
+1. Altere o nome dos jogos e as **Odds** que estão na Betway.
+2. Atribua uma nota de 0 a 10 para cada time (ex: Real Madrid = 9, Mallorca = 4).
+3. O sistema dirá instantaneamente onde o dinheiro está mais "seguro".
+""")
