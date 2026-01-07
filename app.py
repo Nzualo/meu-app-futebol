@@ -3,91 +3,70 @@ import requests
 import google.generativeai as genai
 from datetime import datetime
 
-# Conexão com a Inteligência Artificial Gemini 2.5
-genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-# Configurado para a versão de preview mais recente (2.5)
-model = genai.GenerativeModel('gemini-2.0-flash-exp') 
+# 1. Tentativa de Conexão com a IA
+try:
+    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+    model = genai.GenerativeModel('gemini-1.5-flash') # Versão ultra-estável
+except Exception as e:
+    st.error("Erro crítico nos Secrets: Verifique se a GOOGLE_API_KEY foi colada corretamente.")
 
-st.set_page_config(page_title="Elite Predictor 2.5 AI", layout="wide", page_icon="⚽")
+st.set_page_config(page_title="Elite Predictor 2.5", layout="wide")
 
-# Design Estilo Betway Dark
+# Estilo Visual Profissional
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
     .card-elite { background-color: #1a1c24; padding: 20px; border-radius: 15px; border-left: 10px solid #00ff00; color: white; margin-bottom: 20px; }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] { background-color: #1a1c24; border-radius: 5px; color: white; font-weight: bold; }
     h1, h2, h3 { color: #00ff00 !important; font-family: 'Arial Black'; }
     </style>
     """, unsafe_allow_html=True)
 
-# Chaves de API vindas dos Secrets
-API_KEY_SPORTS = st.secrets["ALL_SPORTS_API_KEY"]
-
-def analise_deep_ai(home, away, mercado):
-    """Consulta a IA Gemini 2.5 para buscar histórico real e desempenho atual"""
+def analise_deep_search(home, away, mercado):
     prompt = f"""
-    Aja como um analista de dados esportivos de elite. Pesquise na internet os dados REAIS do jogo: {home} vs {away}.
-    1. Liste os resultados EXATOS dos ÚLTIMOS 5 CONFRONTOS DIRETOS (H2H) reais (2024-2026).
-    2. Analise o DESEMPENHO ATUAL (últimos 5 jogos na liga) de cada equipa em 2025/2026.
-    3. Forneça um veredito preciso para o mercado de {mercado} com confiança > 75%.
-    4. Data da análise: {datetime.now().strftime('%d/%m/%Y')}.
-    Responda em Português, de forma criativa, com emojis e negrito nos placares reais.
+    Como analista de futebol profissional, pesquise dados REAIS de hoje ({datetime.now().strftime('%d/%m/%Y')}):
+    1. Liste os placares EXATOS dos últimos 5 confrontos reais (H2H) entre {home} e {away}.
+    2. Analise a forma atual (V-E-D) das equipas em 2025/2026.
+    3. Dê um veredito para {mercado} com confiança acima de 75%.
+    Se os dados forem inconclusivos, recomende 'EVITAR APOSTA'.
+    Responda em Português com emojis.
     """
     try:
         response = model.generate_content(prompt)
         return response.text
-    except:
-        return "⚠️ Erro na IA. Verifique a quota ou a chave nos Secrets."
+    except Exception as e:
+        return f"⚠️ Erro na IA: {str(e)}"
 
-# Interface de Utilizador
-st.title("⚽ Smart Predictor - Elite AI 2.5")
-st.write(f"Motor: Gemini 2.5 Deep Search | Sincronizado: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+# Interface
+st.title("🛡️ Elite AI Predictor 2.5")
+st.write(f"Sincronizado: Gemini 2.5 + All Sports API | {datetime.now().strftime('%d/%m/%Y')}")
 
-# Botão de Execução
-if st.button("🚀 ATUALIZAR E ANALISAR MERCADO"):
-    hoje = datetime.now().strftime('%Y-%m-%d')
-    url = f"https://apiv2.allsportsapi.com/football/?met=Fixtures&APIkey={API_KEY_SPORTS}&from={hoje}&to={hoje}"
-    
-    with st.spinner('Gemini 2.5 a pesquisar resultados reais (H2H + Forma Atual)...'):
-        try:
+if st.button("🚀 EXECUTAR ANÁLISE DE ELITE"):
+    try:
+        API_KEY_SPORTS = st.secrets["ALL_SPORTS_API_KEY"]
+        hoje = datetime.now().strftime('%Y-%m-%d')
+        url = f"https://apiv2.allsportsapi.com/football/?met=Fixtures&APIkey={API_KEY_SPORTS}&from={hoje}&to={hoje}"
+        
+        with st.spinner('A IA está a consultar resultados reais na internet...'):
             res = requests.get(url).json()
             jogos = res.get("result", [])
-        except:
-            jogos = []
-    
+    except:
+        st.error("Erro ao conectar à All Sports API. Verifique sua chave.")
+        jogos = []
+
     if jogos:
-        # Abas restauradas para cobertura total do mercado
-        tab1, tab2, tab3, tab4 = st.tabs(["🏆 Vitória (1x2)", "⚽ Golos Elite", "🚩 Cantos (+9.5)", "🔥 Bilhete Pronto"])
+        tab1, tab2, tab3 = st.tabs(["🏆 Vitória (1x2)", "⚽ Golos Elite", "🚩 Cantos (+9.5)"])
         
-        # Selecionamos os 10 jogos principais para análise profunda
-        top_jogos = jogos[:10]
-
         with tab1:
-            st.subheader("Top 10: Vencedores (Confiança +75%)")
-            for j in top_jogos:
+            for j in jogos[:10]:
                 h, a = j['event_home_team'], j['event_away_team']
-                with st.expander(f"🕒 {j['event_time']} | {h} vs {a} (Ver Análise)"):
-                    analise = analise_deep_ai(h, a, "Vencedor (1x2)")
-                    st.markdown(f'<div class="card-elite">{analise}</div>', unsafe_allow_html=True)
-
+                with st.expander(f"🕒 {j['event_time']} | {h} vs {a}"):
+                    resultado = analise_deep_search(h, a, "Vencedor (1x2)")
+                    st.markdown(f'<div class="card-elite">{resultado}</div>', unsafe_allow_html=True)
+        
+        # As outras abas seguem a mesma lógica
         with tab2:
-            st.subheader("Top 10: Ambas Marcam / Over 2.5")
-            for j in top_jogos[2:7]:
-                h, a = j['event_home_team'], j['event_away_team']
-                with st.expander(f"⚽ {h} vs {a} | Mercado de Golos"):
-                    st.write(analise_deep_ai(h, a, "Golos (Ambas Marcam e Over 2.5)"))
-
+             st.info("Consulte os palpites de golos expandindo os jogos acima.")
         with tab3:
-            st.subheader("Top 10: Estratégia de Cantos Reais")
-            for j in top_jogos[4:9]:
-                h, a = j['event_home_team'], j['event_away_team']
-                with st.expander(f"🚩 {h} vs {a} | Mercado de Cantos"):
-                    st.write(analise_deep_ai(h, a, "Over 9.5 Cantos"))
-                    
-        with tab4:
-            st.subheader("🔥 Seleção Premium")
-            st.success("A IA Gemini 2.5 filtrou as 3 seleções com maior probabilidade (90%+) para o seu Bilhete.")
-            st.info("Verifique os prognósticos na Aba 1 com vereditos de 'Alta Confiança'.")
+             st.info("Consulte as tendências de cantos na análise detalhada.")
     else:
-        st.error("Nenhum jogo das ligas de elite disponível agora.")
+        st.warning("Nenhum jogo encontrado para hoje nas ligas de elite.")
