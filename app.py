@@ -3,16 +3,9 @@ import requests
 import google.generativeai as genai
 from datetime import datetime
 
-# 1. Tentativa de Conexão com a IA
-try:
-    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-    model = genai.GenerativeModel('gemini-1.5-flash') # Versão ultra-estável
-except Exception as e:
-    st.error("Erro crítico nos Secrets: Verifique se a GOOGLE_API_KEY foi colada corretamente.")
-
+# 1. Configuração de Estilo Profissional
 st.set_page_config(page_title="Elite Predictor 2.5", layout="wide")
 
-# Estilo Visual Profissional
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
@@ -21,36 +14,43 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-def analise_deep_search(home, away, mercado):
+# 2. Inicialização Segura da IA
+try:
+    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+    # Usando o modelo 1.5-pro para maior precisão em 2026
+    model = genai.GenerativeModel('gemini-1.5-pro')
+except Exception as e:
+    st.error("⚠️ Erro de Configuração: Verifique sua Chave Google nos Secrets.")
+
+def analise_ia_pro(home, away, mercado):
     prompt = f"""
-    Como analista de futebol profissional, pesquise dados REAIS de hoje ({datetime.now().strftime('%d/%m/%Y')}):
-    1. Liste os placares EXATOS dos últimos 5 confrontos reais (H2H) entre {home} e {away}.
-    2. Analise a forma atual (V-E-D) das equipas em 2025/2026.
-    3. Dê um veredito para {mercado} com confiança acima de 75%.
-    Se os dados forem inconclusivos, recomende 'EVITAR APOSTA'.
-    Responda em Português com emojis.
+    Como analista senior, pesquise dados REAIS de 2025/2026 para: {home} vs {away}.
+    1. Liste placares REAIS dos últimos 5 confrontos (H2H) dos últimos 2 anos.
+    2. Analise a forma atual (V-E-D) das equipas.
+    3. Dê veredito para {mercado} com confiança acima de 75%.
+    Se for arriscado, escreva 'EVITAR'. Responda em Português com emojis.
     """
     try:
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"⚠️ Erro na IA: {str(e)}"
+        return f"❌ Erro na IA: {str(e)}"
 
-# Interface
-st.title("🛡️ Elite AI Predictor 2.5")
+# 3. Interface Principal
+st.title("🛡️ Elite Predictor: Inteligência Real")
 st.write(f"Sincronizado: Gemini 2.5 + All Sports API | {datetime.now().strftime('%d/%m/%Y')}")
 
 if st.button("🚀 EXECUTAR ANÁLISE DE ELITE"):
     try:
-        API_KEY_SPORTS = st.secrets["ALL_SPORTS_API_KEY"]
+        api_key_sports = st.secrets["ALL_SPORTS_API_KEY"]
         hoje = datetime.now().strftime('%Y-%m-%d')
-        url = f"https://apiv2.allsportsapi.com/football/?met=Fixtures&APIkey={API_KEY_SPORTS}&from={hoje}&to={hoje}"
+        url = f"https://apiv2.allsportsapi.com/football/?met=Fixtures&APIkey={api_key_sports}&from={hoje}&to={hoje}"
         
-        with st.spinner('A IA está a consultar resultados reais na internet...'):
+        with st.spinner('Buscando jogos e consultando a IA...'):
             res = requests.get(url).json()
             jogos = res.get("result", [])
     except:
-        st.error("Erro ao conectar à All Sports API. Verifique sua chave.")
+        st.error("Erro nos Secrets: 'ALL_SPORTS_API_KEY' não encontrada.")
         jogos = []
 
     if jogos:
@@ -60,13 +60,18 @@ if st.button("🚀 EXECUTAR ANÁLISE DE ELITE"):
             for j in jogos[:10]:
                 h, a = j['event_home_team'], j['event_away_team']
                 with st.expander(f"🕒 {j['event_time']} | {h} vs {a}"):
-                    resultado = analise_deep_search(h, a, "Vencedor (1x2)")
-                    st.markdown(f'<div class="card-elite">{resultado}</div>', unsafe_allow_html=True)
-        
-        # As outras abas seguem a mesma lógica
+                    st.markdown(f'<div class="card-elite">{analise_ia_pro(h, a, "Vencedor (1x2)")}</div>', unsafe_allow_html=True)
+
         with tab2:
-             st.info("Consulte os palpites de golos expandindo os jogos acima.")
+            for j in jogos[2:7]:
+                h, a = j['event_home_team'], j['event_away_team']
+                with st.expander(f"⚽ {h} vs {a} | Golos"):
+                    st.write(analise_ia_pro(h, a, "Golos (Over 2.5 / BTTS)"))
+
         with tab3:
-             st.info("Consulte as tendências de cantos na análise detalhada.")
+            for j in jogos[4:9]:
+                h, a = j['event_home_team'], j['event_away_team']
+                with st.expander(f"🚩 {h} vs {a} | Cantos"):
+                    st.write(analise_ia_pro(h, a, "Cantos (Over 9.5)"))
     else:
-        st.warning("Nenhum jogo encontrado para hoje nas ligas de elite.")
+        st.warning("Nenhum jogo encontrado para hoje.")
