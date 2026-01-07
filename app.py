@@ -123,4 +123,6 @@ if st.button("🚀 GERAR RELATÓRIO DE ELITE"):
 st.sidebar.markdown("""
 ### 📝 O que analisamos:
 - **H2H (5):** Confronto direto.
-- **Forma (V-E-D):** Desempenho individual
+- **Forma (V-E-D):** Desempenho individual nos últimos 5 jogos.
+- **Data:** Dados sincronizados via AllSports API.
+""")
