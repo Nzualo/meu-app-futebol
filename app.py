@@ -1,19 +1,16 @@
 import streamlit as st
 import requests
-import google.generativeai as genai
+from mistralai import Mistral
 from datetime import datetime
 
-# Configuração do Modelo 2.5 Preview (Flash Experimental)
-try:
-    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-    # 'gemini-2.0-flash-exp' é o identificador correto para a versão preview atual
-    model = genai.GenerativeModel('gemini-2.0-flash-exp')
-except Exception as e:
-    st.error(f"Erro ao carregar IA: {e}")
+# 1. Configuração do Agente Mistral
+MISTRAL_API_KEY = st.secrets["MISTRAL_API_KEY"]
+AGENT_ID = "ag_019b9bf3d4cb7275a9b0ffd56dd9a7d4"
+client = Mistral(api_key=MISTRAL_API_KEY)
 
-st.set_page_config(page_title="Elite Predictor 2.5 PRO", layout="wide")
+st.set_page_config(page_title="Elite Predictor - Mistral AI", layout="wide")
 
-# Estilo Dark Mode
+# Estilo Dark Premium
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
@@ -22,48 +19,52 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-def analise_ia_preview(home, away, mercado):
-    """Consulta o Gemini 2.5 Preview para dados reais da internet"""
-    prompt = f"""
-    Pesquise na internet os resultados REAIS (H2H) dos últimos 5 confrontos entre {home} e {away}.
-    Analise o desempenho atual em 2025/2026.
-    Dê um veredito para {mercado} com 75% de confiança.
-    Responda em Português com emojis e negrito nos placares.
-    """
+def analise_mistral_agente(home, away, mercado):
+    """Consulta o SEU Agente Mistral para obter dados reais"""
+    pergunta = f"Analise {home} vs {away} para o mercado de {mercado}. Forneça os últimos 5 confrontos H2H reais e um veredito com 75% de confiança."
     try:
-        response = model.generate_content(prompt)
-        return response.text
+        response = client.agents.complete(
+            agent_id=AGENT_ID,
+            messages=[{"role": "user", "content": pergunta}]
+        )
+        return response.choices[0].message.content
     except Exception as e:
-        return f"❌ Erro na API Gemini: {str(e)}"
+        return f"⚠️ Erro no Agente Mistral: {str(e)}"
 
-st.title("🛡️ Elite Predictor 2.5 Preview")
-st.write(f"Motor: Gemini 2.0 Flash Exp | {datetime.now().strftime('%d/%m/%Y')}")
+# 2. Interface Principal
+st.title("🛡️ Elite AI Predictor (Mistral Edition)")
+st.write(f"Utilizando Agente Personalizado | {datetime.now().strftime('%d/%m/%Y')}")
 
-if st.button("🚀 ANALISAR JOGOS DE HOJE"):
-    api_key = st.secrets["ALL_SPORTS_API_KEY"]
+if st.button("🚀 EXECUTAR VARREDURA COM MISTRAL"):
+    API_KEY_SPORTS = st.secrets["ALL_SPORTS_API_KEY"]
     hoje = datetime.now().strftime('%Y-%m-%d')
-    url = f"https://apiv2.allsportsapi.com/football/?met=Fixtures&APIkey={api_key}&from={hoje}&to={hoje}"
+    url = f"https://apiv2.allsportsapi.com/football/?met=Fixtures&APIkey={API_KEY_SPORTS}&from={hoje}&to={hoje}"
     
-    with st.spinner('A IA Gemini 2.5 está a pesquisar históricos reais...'):
-        try:
-            res = requests.get(url).json()
-            jogos = res.get("result", [])
-            
-            if jogos:
-                tab1, tab2, tab3 = st.tabs(["🏆 Vitória (1x2)", "⚽ Golos Elite", "🚩 Cantos (+9.5)"])
-                
-                with tab1:
-                    for j in jogos[:10]:
-                        h, a = j['event_home_team'], j['event_away_team']
-                        with st.expander(f"🕒 {j['event_time']} | {h} vs {a}"):
-                            resultado = analise_ia_preview(h, a, "Vencedor (1x2)")
-                            st.markdown(f'<div class="card-elite">{resultado}</div>', unsafe_allow_html=True)
-                
-                with tab2:
-                    st.info("As análises de golos estão integradas nos detalhes acima.")
-                with tab3:
-                    st.info("As tendências de cantos estão integradas nos detalhes acima.")
-            else:
-                st.warning("Nenhum jogo encontrado para hoje.")
-        except Exception as e:
-            st.error(f"Erro na All Sports API: {e}")
+    with st.spinner('O seu Agente Mistral está a processar os dados...'):
+        res = requests.get(url).json()
+        jogos = res.get("result", [])
+    
+    if jogos:
+        # Recuperação total das abas
+        tab1, tab2, tab3 = st.tabs(["🏆 Vitória (1x2)", "⚽ Golos Elite", "🚩 Cantos (+9.5)"])
+        
+        with tab1:
+            for j in jogos[:10]:
+                h, a = j['event_home_team'], j['event_away_team']
+                with st.expander(f"🕒 {j['event_time']} | {h} vs {a}"):
+                    resultado = analise_mistral_agente(h, a, "Vencedor (1x2)")
+                    st.markdown(f'<div class="card-elite">{resultado}</div>', unsafe_allow_html=True)
+        
+        with tab2:
+            for j in jogos[2:7]:
+                h, a = j['event_home_team'], j['event_away_team']
+                with st.expander(f"⚽ {h} vs {a}"):
+                    st.write(analise_mistral_agente(h, a, "Golos (Over 2.5 / BTTS)"))
+        
+        with tab3:
+            for j in jogos[4:9]:
+                h, a = j['event_home_team'], j['event_away_team']
+                with st.expander(f"🚩 {h} vs {a}"):
+                    st.write(analise_mistral_agente(h, a, "Cantos (Over 9.5)"))
+    else:
+        st.warning("Nenhum jogo encontrado para hoje.")
