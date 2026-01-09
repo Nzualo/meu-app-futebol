@@ -4,84 +4,98 @@ from openai import OpenAI
 from datetime import datetime, timedelta
 import pytz
 
-# 1. Configuração de Fuso Horário e OpenAI
+# Configuração de Fuso Horário e Cliente OpenAI
 moz_tz = pytz.timezone('Africa/Maputo')
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-try:
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-except Exception as e:
-    st.error("Erro: Verifique a OPENAI_API_KEY nos Secrets.")
-
-st.set_page_config(page_title="Elite Scanner Pro", layout="wide")
+st.set_page_config(page_title="Elite Scanner Multi-Aba", layout="wide")
 
 # Estilo Visual Profissional
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
-    .card-elite { background-color: #1a1c24; padding: 20px; border-radius: 15px; border-left: 10px solid #00ff00; color: white; margin-bottom: 20px; }
-    .data-badge { background-color: #00ff00; color: black; padding: 5px 15px; border-radius: 20px; font-weight: bold; }
+    .card-elite { background-color: #1a1c24; padding: 15px; border-radius: 12px; border-left: 8px solid #00ff00; color: white; margin-bottom: 15px; }
+    .data-badge { background-color: #00ff00; color: black; padding: 5px 12px; border-radius: 15px; font-weight: bold; }
     </style>
     """, unsafe_allow_html=True)
 
-def analise_precisa_gpt(home, away, mercado):
-    """Análise fria e técnica: H2H 2023-2026"""
+def analise_tecnica(home, away, mercado):
+    """Análise fria baseada em factos 2023-2026 para lucro real"""
     prompt = f"""
-    ANALISTA: Analise {home} vs {away} para {mercado}.
-    1. H2H (2023-2026): Liste resultados REAIS dos últimos 5 jogos.
-    2. FORMA: Desempenho técnico atual.
-    3. VEREDITO: Probabilidade matemática > 75%.
-    Sem opiniões. Apenas factos para lucro.
+    ANALISTA MATEMÁTICO: Analise {home} vs {away} para o mercado {mercado}.
+    1. H2H REAIS (2023-2026): Liste os resultados dos últimos 5 confrontos.
+    2. ODDS/PROB: Confirmação técnica para Odds mínimas de 1.30.
+    3. VEREDITO: Apenas se a confiança for > 75%. 
+    Sem opiniões. Responda de forma curta e direta em Português.
     """
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini", # Mais rápido e estável para evitar erros de tempo
-            messages=[{"role": "system", "content": "Algoritmo de previsão desportiva."},
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": "Algoritmo de previsão desportiva de alta precisão."},
                       {"role": "user", "content": prompt}]
         )
         return response.choices[0].message.content
-    except Exception:
-        return "⚠️ Erro na consulta de dados da IA. Tente novamente."
+    except:
+        return "⚠️ Erro na consulta da IA."
 
-# 2. Lógica de Busca de Jogos
+# Lógica de Horário e Busca
 agora_moz = datetime.now(moz_tz)
-st.title("🏆 Elite Intelligence Scanner")
-st.write(f"📍 Maputo: **{agora_moz.strftime('%H:%M')}**")
+st.title("🛡️ Elite Intelligence Scanner 2.5")
+st.write(f"🕒 Hora Atual Maputo: **{agora_moz.strftime('%H:%M')}**")
 
-def carregar_jogos(data_alvo):
+def buscar_jogos(data_alvo):
     API_KEY = st.secrets["ALL_SPORTS_API_KEY"]
-    data_str = data_alvo.strftime('%Y-%m-%d')
-    url = f"https://apiv2.allsportsapi.com/football/?met=Fixtures&APIkey={API_KEY}&from={data_str}&to={data_str}"
+    d_str = data_alvo.strftime('%Y-%m-%d')
+    url = f"https://apiv2.allsportsapi.com/football/?met=Fixtures&APIkey={API_KEY}&from={d_str}&to={d_str}"
     try:
         res = requests.get(url).json()
         return res.get("result", [])
     except:
         return []
 
-if st.button("🚀 INICIAR VARREDURA"):
-    # Busca HOJE
-    jogos = carregar_jogos(agora_moz)
-    
-    # Filtro de horário: apenas jogos que começam DEPOIS de agora em Moçambique
-    jogos_filtrados = [j for j in jogos if datetime.strptime(j['event_time'], '%H:%M').time() > agora_moz.time()]
-    data_exibicao = agora_moz.strftime('%d/%m/%Y')
+if st.button("🚀 INICIAR VARREDURA MULTI-ABA"):
+    jogos = buscar_jogos(agora_moz)
+    # Filtra apenas jogos futuros para o fuso de Moçambique
+    jogos_finais = [j for j in jogos if datetime.strptime(j['event_time'], '%H:%M').time() > agora_moz.time()]
+    data_label = agora_moz.strftime('%d/%m/%Y')
 
-    # Se não houver jogos hoje, pula para AMANHÃ automaticamente
-    if not jogos_filtrados:
-        st.warning("🌙 Sem mais jogos para hoje. Buscando agenda de AMANHÃ...")
+    if not jogos_finais:
+        st.warning("🌙 Sem mais jogos hoje. Buscando amanhã...")
         amanha = agora_moz + timedelta(days=1)
-        jogos_filtrados = carregar_jogos(amanha)
-        data_exibicao = amanha.strftime('%d/%m/%Y')
+        jogos_finais = buscar_jogos(amanha)
+        data_label = amanha.strftime('%d/%m/%Y')
 
-    if jogos_filtrados:
-        st.markdown(f"Exibindo jogos de: <span class='data-badge'>{data_exibicao}</span>", unsafe_allow_html=True)
-        tab1, tab2, tab3 = st.tabs(["🏆 Vitória", "⚽ Golos", "🚩 Cantos"])
+    if jogos_finais:
+        st.markdown(f"🗓️ Jogos de: <span class='data-badge'>{data_label}</span>", unsafe_allow_html=True)
         
-        with tab1:
-            for j in jogos_filtrados[:15]:
-                h, a = j['event_home_team'], j['event_away_team']
-                with st.expander(f"🕒 {j['event_time']} | {h} vs {a}"):
-                    analise = analise_precisa_gpt(h, a, "Vencedor (1x2)")
-                    st.markdown(f'<div class="card-elite">{analise}</div>', unsafe_allow_html=True)
-        # (Outras abas seguem a mesma lógica...)
+        # Criação das abas solicitadas
+        tabs = st.tabs(["🏆 1x2", "⚽ Ambas (Y/N)", "📈 Over 1.5/2.5", "👥 DC + Over", "🔥 DC + Ambas", "🚩 Cantos +8.5"])
+        
+        # Divisão dos jogos para não repetir o mesmo jogo em abas diferentes
+        chunks = [jogos_finais[i:i + 2] for i in range(0, len(jogos_finais), 2)]
+
+        mercados = [
+            ("Vitória (1x2)", 0),
+            ("Ambas Marcam (Sim/Não)", 1),
+            ("Golos (Over 1.5 ou 2.5)", 2),
+            ("Dupla Chance + Over 1.5/2.5", 3),
+            ("Dupla Chance + Ambas Marcam", 4),
+            ("Cantos (Over 8.5)", 5)
+        ]
+
+        for nome_mercado, index in mercados:
+            with tabs[index]:
+                st.subheader(f"Top Opções: {nome_mercado}")
+                # Seleciona 1 a 2 equipas por categoria sem repetir jogos anteriores
+                jogos_da_aba = chunks[index] if index < len(chunks) else []
+                
+                if jogos_da_aba:
+                    for j in jogos_da_aba:
+                        h, a = j['event_home_team'], j['event_away_team']
+                        with st.expander(f"🕒 {j['event_time']} | {h} vs {a}"):
+                            analise = analise_tecnica(h, a, nome_mercado)
+                            st.markdown(f'<div class="card-elite">{analise}</div>', unsafe_allow_html=True)
+                else:
+                    st.write("Sem jogos suficientes para este mercado nesta data.")
     else:
-        st.error("Não foram encontrados jogos para hoje nem para amanhã.")
+        st.error("Nenhum jogo de elite encontrado.")
