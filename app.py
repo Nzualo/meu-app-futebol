@@ -4,98 +4,99 @@ from openai import OpenAI
 from datetime import datetime, timedelta
 import pytz
 
-# 1. CONFIGURAÇÕES TÉCNICAS
-moz_tz = pytz.timezone('Africa/Maputo')
+# 1. CONFIGURAÇÕES DE API E LOCALIZAÇÃO
+# Detecta automaticamente ou usa Maputo/Inhassoro como base (GMT+2)
+local_tz = pytz.timezone('Africa/Maputo') 
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-FOOTBALL_API_KEY = "2f3bc9f0346c3803720553cecbdbb6bd" # Sua chave ativa
+FOOTBALL_API_KEY = "2f3bc9f0346c3803720553cecbdbb6bd"
 
-st.set_page_config(page_title="Elite Predictor 2.6", layout="wide")
+st.set_page_config(page_title="Elite Scanner - Inhassoro", layout="wide")
 
-# Estilo Visual Dark Mode
+# Estilo Visual Dark
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
     .card-elite { background-color: #1a1c24; padding: 15px; border-radius: 12px; border-left: 8px solid #00ff00; color: white; margin-bottom: 15px; }
-    .data-badge { background-color: #00ff00; color: black; padding: 4px 10px; border-radius: 10px; font-weight: bold; }
+    .data-badge { background-color: #00ff00; color: black; padding: 5px 12px; border-radius: 15px; font-weight: bold; }
     </style>
     """, unsafe_allow_html=True)
 
-# 2. FUNÇÕES DE DADOS REAIS
 def buscar_h2h_real(id_home, id_away):
-    """Busca o H2H real para a IA não 'alucinar' resultados"""
     url = f"https://v3.football.api-sports.io/fixtures/headtohead?h2h={id_home}-{id_away}&last=5"
     headers = {'x-rapidapi-key': FOOTBALL_API_KEY}
     try:
         res = requests.get(url, headers=headers).json()
         return res.get("response", [])
-    except:
-        return []
+    except: return []
 
-def analise_ia_pro(home, away, h2h_lista, mercado):
-    """Alimenta a IA com os dados da API para eliminar divergências"""
-    # Transforma os dados da API em texto legível para o GPT
-    historico_texto = "\n".join([
-        f"- {m['fixture']['date'][:10]}: {m['teams']['home']['name']} {m['goals']['home']}-{m['goals']['away']} {m['teams']['away']['name']}" 
-        for m in h2h_lista
-    ])
-    
+def analise_ia_detalhada(home, away, h2h_lista, mercado):
+    historico = "\n".join([f"- {m['fixture']['date'][:10]}: {m['teams']['home']['name']} {m['goals']['home']}-{m['goals']['away']} {m['teams']['away']['name']}" for m in h2h_lista])
     prompt = f"""
-    ANALISTA MATEMÁTICO: Analise {home} vs {away} para o mercado {mercado}.
+    ANALISTA PROFISSIONAL: Analise {home} vs {away} para {mercado}.
     DADOS REAIS H2H (2023-2026):
-    {historico_texto if historico_texto else "Sem confrontos diretos recentes."}
+    {historico if historico else "Sem histórico recente."}
     
-    TAREFA: Use APENAS os factos acima. 
-    1. Veredito seco para lucro (Odd min 1.30).
-    2. Confiança > 75%. Se for menor, recomende 'EVITAR'.
-    Responda de forma curta em Português com emojis.
+    TAREFA: Forneça o veredito com detalhes técnicos. Confiança > 75%. 
+    Se não houver dados suficientes, não invente, diga 'DADOS INSUFICIENTES'.
     """
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "system", "content": "Algoritmo de previsão estatística de alta precisão."},
-                      {"role": "user", "content": prompt}]
-        )
+        response = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
         return response.choices[0].message.content
-    except:
-        return "⚠️ Erro na resposta da IA. Verifique saldo/quota."
+    except: return "⚠️ IA temporariamente indisponível."
 
-# 3. INTERFACE E LÓGICA DE HORÁRIO
-agora_moz = datetime.now(moz_tz)
-st.title("🛡️ Elite Intelligence Scanner 2.6")
-st.write(f"🕒 Hora Atual Maputo: **{agora_moz.strftime('%H:%M')}**")
+# 2. RELÓGIO E LÓGICA DE FILTRAGEM
+agora_local = datetime.now(local_tz)
+st.title("🛡️ Elite Intelligence Scanner 2.7")
+# Exibição com Segundos como solicitado
+st.write(f"📍 Localização: **Inhassoro/Maputo** | 🕒 Hora Atual: **{agora_local.strftime('%H:%M:%S')}**")
 
-if st.button("🚀 EXECUTAR VARREDURA DE ELITE"):
+def carregar_dados_api(data_alvo):
     headers = {'x-rapidapi-key': FOOTBALL_API_KEY}
-    url = f"https://v3.football.api-sports.io/fixtures?date={agora_moz.strftime('%Y-%m-%d')}"
+    url = f"https://v3.football.api-sports.io/fixtures?date={data_alvo.strftime('%Y-%m-%d')}"
+    res = requests.get(url, headers=headers).json()
+    return res.get("response", [])
+
+if st.button("🚀 EXECUTAR VARREDURA EM TEMPO REAL"):
+    # 1. Tenta buscar jogos de hoje
+    fixtures = carregar_dados_api(agora_local)
     
-    with st.spinner('A extrair dados oficiais...'):
-        fixtures = requests.get(url, headers=headers).json().get("response", [])
-        # Filtra apenas jogos que ainda não começaram
-        jogos_filtrados = [f for f in fixtures if datetime.fromisoformat(f['fixture']['date']).astimezone(moz_tz) > agora_moz]
-
-    # Salta para amanhã se não houver mais jogos hoje
-    if not jogos_filtrados:
-        st.warning("🌙 Sem mais jogos hoje. Buscando agenda de AMANHÃ...")
-        amanha = (agora_moz + timedelta(days=1)).strftime('%Y-%m-%d')
-        url = f"https://v3.football.api-sports.io/fixtures?date={amanha}"
-        jogos_filtrados = requests.get(url, headers=headers).json().get("response", [])
-
-    if jogos_filtrados:
-        tabs = st.tabs(["🏆 1x2", "⚽ Ambas Y/N", "📈 Over 1.5/2.5", "👥 DC+Over", "🔥 DC+Ambas", "🚩 Cantos +8.5", "🟣 ZEBRAS"])
+    # FILTRO RIGOROSO: Hora e Minuto. Exclui jogos das 00:00 se já for 01:00.
+    jogos_futuros = []
+    for f in fixtures:
+        # Converter hora do jogo para o fuso local para comparação justa
+        hora_jogo_utc = datetime.fromisoformat(f['fixture']['date'].replace('Z', '+00:00'))
+        hora_jogo_local = hora_jogo_utc.astimezone(local_tz)
         
-        mercados = [
-            ("Vencedor (1x2)", 0), ("Ambas Marcam", 1), ("Golos (Over 1.5/2.5)", 2),
-            ("Dupla Chance + Over", 3), ("Dupla Chance + Ambas", 4), ("Cantos +8.5", 5), ("Zebra (Odd 4-11)", 6)
-        ]
+        if hora_jogo_local > agora_local:
+            jogos_futuros.append(f)
 
-        for nome_m, idx in mercados:
-            with tabs[idx]:
-                # Mostra o Top 10 para cada aba sem repetir
-                for f in jogos_filtrados[idx*2 : (idx*2)+10]:
+    # 2. Se não houver nada futuro para hoje, pula para amanhã
+    data_mostrar = agora_local
+    if not jogos_futuros:
+        st.warning("🌙 Sem jogos futuros para hoje em Inhassoro. A buscar agenda de AMANHÃ...")
+        data_mostrar = agora_local + timedelta(days=1)
+        jogos_futuros = carregar_dados_api(data_mostrar)
+
+    if jogos_futuros:
+        st.markdown(f"🗓️ Agenda para: <span class='data-badge'>{data_mostrar.strftime('%d/%m/%Y')}</span>", unsafe_allow_html=True)
+        
+        tabs = st.tabs(["🏆 1x2", "⚽ Ambas", "📈 Over", "👥 DC+Over", "🔥 DC+Ambas", "🚩 Cantos", "🟣 ZEBRAS"])
+        mercados = ["Vitória (1x2)", "Ambas Marcam", "Over 1.5/2.5", "Dupla Chance + Over", "Dupla Chance + Ambas", "Cantos +8.5", "Zebra (Odd 4-11)"]
+
+        for i, mercado in enumerate(mercados):
+            with tabs[i]:
+                # Mostra o Top 10 por aba para garantir detalhes
+                selecao = jogos_futuros[i*3 : (i*3)+10] # Garante que as abas mostrem jogos diferentes
+                if not selecao: selecao = jogos_futuros[:10]
+                
+                for f in selecao:
                     h, a = f['teams']['home'], f['teams']['away']
-                    with st.expander(f"🕒 {f['fixture']['date'][11:16]} | {h['name']} vs {a['name']}"):
+                    # Mostrar hora local formatada no expander
+                    hora_formatada = datetime.fromisoformat(f['fixture']['date'].replace('Z', '+00:00')).astimezone(local_tz).strftime('%H:%M')
+                    
+                    with st.expander(f"🕒 {hora_formatada} | {h['name']} vs {a['name']}"):
                         h2h = buscar_h2h_real(h['id'], a['id'])
-                        resultado = analise_ia_pro(h['name'], a['name'], h2h, nome_m)
-                        st.markdown(f'<div class="card-elite">{resultado}</div>', unsafe_allow_html=True)
+                        detalhes = analise_ia_detalhada(h['name'], a['name'], h2h, mercado)
+                        st.markdown(f'<div class="card-elite">{detalhes}</div>', unsafe_allow_html=True)
     else:
-        st.error("Nenhum jogo encontrado para hoje ou amanhã.")
+        st.error("Nenhum jogo encontrado na base de dados para as próximas 24 horas.")
