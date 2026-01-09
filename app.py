@@ -2,62 +2,86 @@ import streamlit as st
 import requests
 from openai import OpenAI
 from datetime import datetime
+import pytz
 
-# 1. Configuração do ChatGPT (OpenAI)
+# 1. Configuração de Fuso Horário e API
+moz_tz = pytz.timezone('Africa/Maputo')
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-# 2. Design de Elite
-st.set_page_config(page_title="Elite Predictor ChatGPT", layout="wide")
+st.set_page_config(page_title="Scanner Elite Pro - MOZ", layout="wide")
+
+# Estilo Visual Focado em Performance
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
     .card-elite { background-color: #1a1c24; padding: 20px; border-radius: 15px; border-left: 10px solid #00ff00; color: white; margin-bottom: 20px; }
-    h1, h2, h3 { color: #00ff00 !important; font-family: 'Arial Black'; }
+    .status-live { color: #ff0000; font-weight: bold; animation: blinker 1s linear infinite; }
+    @keyframes blinker { 50% { opacity: 0; } }
     </style>
     """, unsafe_allow_html=True)
 
-def analise_chatgpt(home, away, mercado):
-    """O ChatGPT analisa os dados reais e gera o veredito"""
+def analise_precisa_gpt(home, away, mercado):
+    """Análise técnica fria focada em lucro (H2H 2023-2026)"""
+    prompt = f"""
+    ANALISTA TÉCNICO: Forneça dados brutos e probabilidade real para {home} vs {away}.
+    1. H2H (2023-2026): Liste apenas placares REAIS dos últimos 5 confrontos.
+    2. DESEMPENHO: Forma física e técnica das equipas nos últimos 3 meses.
+    3. VEREDITO: Probabilidade matemática para {mercado}.
+    4. ALVO: Apenas prognósticos com confiança > 75%.
+    ESTILO: Sem opiniões, apenas factos e números. Responda em Português.
+    """
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini", # Modelo rápido e económico
-            messages=[
-                {"role": "system", "content": "És um analista de apostas de elite da Betway Moçambique."},
-                {"role": "user", "content": f"Analise {home} vs {away} para o mercado {mercado}. Forneça os últimos 5 confrontos reais (H2H) e veredito com 75% de confiança. Use emojis e negrito nos placares."}
-            ]
+            model="gpt-4o",
+            messages=[{"role": "system", "content": "És um algoritmo de previsão desportiva de alta precisão."},
+                      {"role": "user", "content": prompt}]
         )
         return response.choices[0].message.content
-    except Exception as e:
-        return f"⚠️ Erro no ChatGPT: {str(e)}"
+    except:
+        return "⚠️ Erro na consulta de dados."
 
-# 3. Interface Principal
-st.title("🛡️ Elite AI Predictor: GPT Edition")
-st.write(f"Motor: ChatGPT + Football-Data.org | {datetime.now().strftime('%d/%m/%Y')}")
+# 2. Interface e Lógica de Horário
+st.title("🏆 Elite Intelligence Scanner")
+agora_moz = datetime.now(moz_tz)
+st.write(f"📍 Fuso Horário: **Maputo (GMT+2)** | 🕒 Hora Atual: **{agora_moz.strftime('%H:%M')}**")
 
-if st.button("🚀 EXECUTAR VARREDURA DE ELITE"):
-    headers = {'X-Auth-Token': st.secrets["FOOTBALL_DATA_API_KEY"]}
-    url = "https://api.football-data.org/v4/matches"
+if st.button("🚀 VARREDURA DE JOGOS FUTUROS"):
+    API_KEY = st.secrets["ALL_SPORTS_API_KEY"]
+    hoje = agora_moz.strftime('%Y-%m-%d')
+    url = f"https://apiv2.allsportsapi.com/football/?met=Fixtures&APIkey={API_KEY}&from={hoje}&to={hoje}"
     
-    with st.spinner('O ChatGPT está a analisar históricos reais...'):
-        try:
-            matches = requests.get(url, headers=headers).json().get("matches", [])
-        except:
-            matches = []
+    with st.spinner('A filtrar jogos por decorrer...'):
+        res = requests.get(url).json()
+        todos_jogos = res.get("result", [])
+        
+        # FILTRO DE HORÁRIO: Apenas jogos cuja hora seja maior que a hora atual de Moçambique
+        jogos_filtrados = []
+        for j in todos_jogos:
+            hora_jogo = datetime.strptime(j['event_time'], '%H:%M').time()
+            if hora_jogo > agora_moz.time():
+                jogos_filtrados.append(j)
 
-    if matches:
-        # Abas restauradas
-        tab1, tab2, tab3 = st.tabs(["🏆 Vitória (1x2)", "⚽ Golos Elite", "🚩 Cantos (+9.5)"])
-
+    if jogos_filtrados:
+        tab1, tab2, tab3 = st.tabs(["🏆 Vitória (1x2)", "⚽ Golos", "🚩 Cantos"])
+        
         with tab1:
-            for m in matches[:10]:
-                h, a = m['homeTeam']['name'], m['awayTeam']['name']
-                with st.expander(f"🕒 {m['utcDate'][11:16]} | {h} vs {a}"):
-                    resultado = analise_chatgpt(h, a, "Vitória (1x2)")
-                    st.markdown(f'<div class="card-elite">{resultado}</div>', unsafe_allow_html=True)
+            st.subheader(f"Próximos Jogos (A partir das {agora_moz.strftime('%H:%M')})")
+            for j in jogos_filtrados[:12]:
+                home, away = j['event_home_team'], j['event_away_team']
+                with st.expander(f"🕒 {j['event_time']} | {home} vs {away}"):
+                    analise = analise_precisa_gpt(home, away, "Vencedor (1x2)")
+                    st.markdown(f'<div class="card-elite">{analise}</div>', unsafe_allow_html=True)
         
         with tab2:
-            st.info("Abra os detalhes na Aba Vitória para ver análises de Golos.")
+            for j in jogos_filtrados[2:7]:
+                home, away = j['event_home_team'], j['event_away_team']
+                with st.expander(f"⚽ {home} vs {away} | Golos"):
+                    st.write(analise_precisa_gpt(home, away, "Golos (Over 2.5)"))
+                    
         with tab3:
-            st.info("As tendências de Cantos estão integradas na análise do ChatGPT.")
+            for j in jogos_filtrados[4:9]:
+                home, away = j['event_home_team'], j['event_away_team']
+                with st.expander(f"🚩 {home} vs {away} | Cantos"):
+                    st.write(analise_precisa_gpt(home, away, "Cantos (Over 9.5)"))
     else:
-        st.error("Nenhum jogo encontrado. Verifique a sua chave API-Football.")
+        st.warning("Não existem mais jogos agendados para hoje após este horário.")
