@@ -3,7 +3,6 @@ import json
 import os
 import hashlib
 import threading
-import io
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -12,16 +11,19 @@ import requests
 import streamlit as st
 from openai import OpenAI
 
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-
 # ============================================================
 # SECRETS (Streamlit Cloud -> Manage app -> Settings -> Secrets)
 # ============================================================
 # FOOTBALL_API_MODE = "allsports"
 # ALLSPORTS_API_KEY = "SUA_CHAVE_ALLSPORTS"
-# OPENAI_API_KEY    = "SUA_CHAVE_OPENAI"   # opcional (IA)
-# PREMIUM_CODES = "NZUALO30,NZUALO50,VIP2026"   # opcional (monetização)
+# OPENAI_API_KEY    = "SUA_CHAVE_OPENAI"   # IA (VIP)
+# PREMIUM_CODES = "NZUALO50,VIPSEMANAL"     # opcional
+# VIP_PRICE_MZN = 50
+# VIP_DAYS = 7
+# ADMIN_EMAILS = "nzualoservices@gmail.com"
+# ADMIN_PASSWORD = "SENHA_FORTE"
+# SUPABASE_URL = "https://xxxx.supabase.co"
+# SUPABASE_SERVICE_ROLE_KEY = "SERVICE_ROLE_KEY"
 # ============================================================
 
 # =============================
@@ -35,8 +37,13 @@ TOP_TIPS_MIN_ODD = 1.40
 TOP_TIPS_MAX_ODD = 2.00
 
 # FREE limits
-FREE_MAX_GENERATES_PER_DAY = 3  # por dia (persistente)
+FREE_MAX_GENERATES_PER_DAY = 3  # por dia
 LIMITS_FILE = "free_limits.json"  # persistência leve
+
+VIP_DAYS = int(st.secrets.get("VIP_DAYS", 7))
+VIP_PRICE_MZN = float(st.secrets.get("VIP_PRICE_MZN", 50))
+
+ADMIN_EMAILS_DEFAULT = "nzualoservices@gmail.com"
 
 st.set_page_config(page_title="Melhores Palpites do Dia", layout="wide")
 
@@ -85,19 +92,14 @@ st.markdown(
   background: rgba(255,255,255,0.08); color: #fff; font-weight: 900;
 }
 
-.kpi {
-  background: rgba(255,255,255,0.06);
-  border: 1px solid rgba(255,255,255,0.10);
-  border-radius: 12px;
-  padding: 10px 12px;
-  margin-top: 8px;
-}
-.kpi b { color:#fff; }
-hr { border-color: rgba(255,255,255,0.08); }
+.hr { height:1px; background: rgba(255,255,255,0.10); margin: 10px 0; }
 
-.locked {
-  opacity: 0.55;
-  filter: grayscale(35%);
+.admin-card {
+  background: rgba(0,0,0,0.20);
+  border: 1px solid rgba(255,255,255,0.12);
+  padding: 10px 12px;
+  border-radius: 12px;
+  margin-bottom: 10px;
 }
 </style>
 """,
@@ -126,19 +128,7 @@ def get_premium_codes() -> List[str]:
 
 
 # =============================
-# Feature flags (Premium)
-# =============================
-def feature_enabled(name: str) -> bool:
-    """
-    Centraliza o gating de recursos Premium.
-    """
-    if name in ("AI_EXPLAIN", "AI_RISK", "EXPORT_PDF", "EXPORT_WA", "TOP_TIPS_PRO", "MULTIBET", "HISTORY", "FAVORITES", "PERF_BOOST"):
-        return is_premium()
-    return True
-
-
-# =============================
-# Monetização: Premium + FREE 3/dia (persistente)
+# Monetização: VIP + FREE 3/dia (persistente)
 # =============================
 @st.cache_resource
 def _limits_lock():
@@ -170,6 +160,9 @@ def _safe_save_limits(data: Dict) -> None:
 
 
 def _fingerprint() -> str:
+    """
+    Identificador leve do utilizador (sem IP).
+    """
     ua = ""
     lang = ""
     try:
@@ -183,33 +176,16 @@ def _fingerprint() -> str:
 
     seed = (ua + "|" + lang).strip()
     if not seed:
-        seed = "sess|" + str(st.session_state.get("_sid_fallback", ""))
-        if seed.endswith("|"):
-            seed += "x"
-
+        seed = "sess|" + str(st.session_state.get("_sid_fallback", "x"))
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:20]
 
 
-def is_premium() -> bool:
-    return bool(st.session_state.get("is_premium", False))
-
-
-def premium_activate(code: str) -> bool:
-    codes = get_premium_codes()
-    if not codes:
-        return False
-    if code.strip() in codes:
-        st.session_state["is_premium"] = True
-        return True
-    return False
-
-
-def premium_logout():
-    st.session_state["is_premium"] = False
+def user_id() -> str:
+    return _fingerprint()
 
 
 def free_used_today() -> int:
-    if is_premium():
+    if st.session_state.get("is_vip", False):
         return 0
     with _limits_lock():
         data = _safe_load_limits()
@@ -219,17 +195,17 @@ def free_used_today() -> int:
 
 
 def free_remaining_today() -> int:
-    if is_premium():
+    if st.session_state.get("is_vip", False):
         return 999999
     return max(0, FREE_MAX_GENERATES_PER_DAY - free_used_today())
 
 
 def free_can_generate() -> bool:
-    return is_premium() or (free_used_today() < FREE_MAX_GENERATES_PER_DAY)
+    return st.session_state.get("is_vip", False) or (free_used_today() < FREE_MAX_GENERATES_PER_DAY)
 
 
 def consume_generate_chance() -> None:
-    if is_premium():
+    if st.session_state.get("is_vip", False):
         return
     with _limits_lock():
         data = _safe_load_limits()
@@ -239,6 +215,7 @@ def consume_generate_chance() -> None:
             data[day] = {}
         cur = int(data[day].get(fp, 0))
         data[day][fp] = cur + 1
+        # mantém últimos 10 dias
         try:
             days_sorted = sorted(data.keys())
             if len(days_sorted) > 10:
@@ -250,33 +227,185 @@ def consume_generate_chance() -> None:
 
 
 # =============================
-# Session history / favorites (Premium)
+# Supabase (REST) - VIP e Pagamentos
 # =============================
-def _ensure_session_lists():
-    if "history" not in st.session_state:
-        st.session_state["history"] = []  # lista de dicts {ts, tab, picks}
-    if "favorites" not in st.session_state:
-        st.session_state["favorites"] = []  # lista de picks
+def supabase_enabled() -> bool:
+    return bool(st.secrets.get("SUPABASE_URL")) and bool(st.secrets.get("SUPABASE_SERVICE_ROLE_KEY"))
 
 
-def add_to_history(tab_name: str, picks: List[Dict]):
-    _ensure_session_lists()
-    if not feature_enabled("HISTORY"):
-        return
-    st.session_state["history"].insert(0, {"ts": datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S"), "tab": tab_name, "picks": picks})
-    st.session_state["history"] = st.session_state["history"][:20]
+def sb_headers() -> Dict[str, str]:
+    key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    return {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
 
 
-def add_to_favorites(pick: Dict):
-    _ensure_session_lists()
-    if not feature_enabled("FAVORITES"):
-        return
-    # evita duplicados por fixture + pick
-    key = f"{pick.get('fixture_id')}|{pick.get('pick')}"
-    existing = {f"{p.get('fixture_id')}|{p.get('pick')}" for p in st.session_state["favorites"]}
-    if key not in existing:
-        st.session_state["favorites"].insert(0, pick)
-        st.session_state["favorites"] = st.session_state["favorites"][:30]
+def sb_url(path: str) -> str:
+    base = str(st.secrets.get("SUPABASE_URL", "")).rstrip("/")
+    return f"{base}/rest/v1/{path.lstrip('/')}"
+
+
+def sb_get_entitlement(uid: str) -> Optional[str]:
+    if not supabase_enabled():
+        return None
+    try:
+        url = sb_url(f"entitlements?user_id=eq.{uid}&select=vip_until")
+        r = requests.get(url, headers=sb_headers(), timeout=12)
+        if r.status_code != 200:
+            return None
+        rows = r.json() or []
+        if not rows:
+            return None
+        return rows[0].get("vip_until")
+    except Exception:
+        return None
+
+
+def sb_set_entitlement(uid: str, vip_until_iso: str) -> bool:
+    if not supabase_enabled():
+        return False
+    try:
+        payload = {"user_id": uid, "vip_until": vip_until_iso, "updated_at": datetime.utcnow().isoformat()}
+        url = sb_url("entitlements")
+        r = requests.post(url, headers={**sb_headers(), "Prefer": "resolution=merge-duplicates,return=representation"}, data=json.dumps(payload), timeout=12)
+        return r.status_code in (200, 201)
+    except Exception:
+        return False
+
+
+def sb_insert_payment(uid: str, provider: str, amount: float, reference: str, status: str = "pending") -> bool:
+    if not supabase_enabled():
+        return False
+    try:
+        payload = {
+            "user_id": uid,
+            "provider": provider,
+            "amount": amount,
+            "reference": reference,
+            "status": status,
+        }
+        url = sb_url("payments")
+        r = requests.post(url, headers=sb_headers(), data=json.dumps(payload), timeout=12)
+        return r.status_code in (200, 201)
+    except Exception:
+        return False
+
+
+def sb_list_pending_payments(limit: int = 50) -> List[Dict]:
+    if not supabase_enabled():
+        return []
+    try:
+        url = sb_url(f"payments?status=eq.pending&order=created_at.desc&limit={limit}")
+        r = requests.get(url, headers=sb_headers(), timeout=12)
+        if r.status_code != 200:
+            return []
+        return r.json() or []
+    except Exception:
+        return []
+
+
+def sb_mark_payment_paid(payment_id: int) -> bool:
+    if not supabase_enabled():
+        return False
+    try:
+        payload = {"status": "paid", "paid_at": datetime.utcnow().isoformat()}
+        url = sb_url(f"payments?id=eq.{payment_id}")
+        r = requests.patch(url, headers=sb_headers(), data=json.dumps(payload), timeout=12)
+        return r.status_code in (200, 204)
+    except Exception:
+        return False
+
+
+def sb_mark_payment_rejected(payment_id: int) -> bool:
+    if not supabase_enabled():
+        return False
+    try:
+        payload = {"status": "rejected"}
+        url = sb_url(f"payments?id=eq.{payment_id}")
+        r = requests.patch(url, headers=sb_headers(), data=json.dumps(payload), timeout=12)
+        return r.status_code in (200, 204)
+    except Exception:
+        return False
+
+
+def is_vip_now(uid: str) -> bool:
+    pu = sb_get_entitlement(uid)
+    if not pu:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(pu).replace("Z", "+00:00"))
+        return dt > datetime.now(pytz.UTC)
+    except Exception:
+        return False
+
+
+def grant_vip_7_days(uid: str) -> bool:
+    now = datetime.now(pytz.UTC)
+    current = sb_get_entitlement(uid)
+    base = now
+    if current:
+        try:
+            cur_dt = datetime.fromisoformat(str(current).replace("Z", "+00:00"))
+            if cur_dt > base:
+                base = cur_dt
+        except Exception:
+            pass
+    new_until = base + timedelta(days=VIP_DAYS)
+    return sb_set_entitlement(uid, new_until.isoformat())
+
+
+# =============================
+# Admin access
+# =============================
+def _user_email_if_any() -> Optional[str]:
+    # Só funciona se o Streamlit fornecer (apps com auth)
+    try:
+        u = getattr(st, "experimental_user", None)
+        if u and isinstance(u, dict):
+            e = u.get("email")
+            return str(e).strip().lower() if e else None
+    except Exception:
+        pass
+    return None
+
+
+def admin_emails() -> List[str]:
+    raw = str(st.secrets.get("ADMIN_EMAILS", ADMIN_EMAILS_DEFAULT) or "").strip()
+    if not raw:
+        return [ADMIN_EMAILS_DEFAULT]
+    return [x.strip().lower() for x in raw.split(",") if x.strip()]
+
+
+def is_admin() -> bool:
+    # modo 1: email (se existir)
+    em = _user_email_if_any()
+    if em and em in admin_emails():
+        return True
+
+    # modo 2: senha
+    if st.session_state.get("admin_unlocked", False):
+        return True
+
+    return False
+
+
+def admin_unlock_box():
+    st.markdown("### Admin")
+    st.caption("Acesso por email (se disponível) ou por senha.")
+    if _user_email_if_any():
+        st.write("Email detetado:", _user_email_if_any())
+
+    pwd = st.text_input("Senha Admin", type="password", placeholder="ADMIN_PASSWORD", key="admin_pwd")
+    if st.button("Desbloquear Admin"):
+        sec = str(st.secrets.get("ADMIN_PASSWORD", "") or "")
+        if sec and pwd == sec:
+            st.session_state["admin_unlocked"] = True
+            st.success("Admin desbloqueado.")
+        else:
+            st.error("Senha inválida.")
 
 
 # =============================
@@ -314,7 +443,7 @@ def ai_explain_pick_cached(
     edge_txt = "n/a" if edge is None else f"{edge*100:.1f}%"
 
     prompt = f"""
-Explique o pick abaixo de forma curta.
+Você é um analista profissional de apostas esportivas. Explique o pick abaixo de forma curta.
 Regras: 4–7 linhas, simples, sem inventar dados externos, inclua 1 risco, finalize com confiança em % (<=90).
 
 Jogo: {match}
@@ -325,6 +454,7 @@ Pick: {pick_name}
 
 Modelo: Prob={prob:.3f} | Odd={odd:.2f} | Odd justa={fair:.2f} | Edge={edge_txt} | Evidência={ev} | λ={lam_h:.2f}-{lam_a:.2f}
 """
+
     try:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -337,139 +467,6 @@ Modelo: Prob={prob:.3f} | Odd={odd:.2f} | Odd justa={fair:.2f} | Edge={edge_txt}
         return _short(resp.choices[0].message.content or "", 700)
     except Exception:
         return "IA indisponível no momento para este pick."
-
-
-@st.cache_data(ttl=60 * 60 * 24)
-def ai_risk_note_cached(
-    league: str,
-    match: str,
-    market: str,
-    pick_name: str,
-    time_str: str,
-    prob: float,
-    odd: float,
-    fair: float,
-    edge: Optional[float],
-    ev: str,
-    lam_h: float,
-    lam_a: float,
-) -> str:
-    client = get_openai_client()
-    edge_txt = "n/a" if edge is None else f"{edge*100:.1f}%"
-
-    prompt = f"""
-Dê um alerta curto sobre quando NÃO apostar neste pick.
-
-Regras:
-- 3 a 6 linhas.
-- Use APENAS os dados fornecidos.
-- Liste 2 a 4 red flags.
-- Termine com: "Se ainda apostar: stake baixa."
-
-Pick:
-Jogo: {match}
-Liga: {league}
-Hora: {time_str}
-Mercado: {market}
-Pick: {pick_name}
-
-Dados do modelo: Prob={prob:.3f} | Odd={odd:.2f} | Odd justa={fair:.2f} | Edge={edge_txt} | Evidência={ev} | λ={lam_h:.2f}-{lam_a:.2f}
-"""
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Responda em português, direto e prático."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.4,
-        )
-        return _short(resp.choices[0].message.content or "", 700)
-    except Exception:
-        return "IA indisponível no momento para alertas de risco."
-
-
-# =============================
-# Export Top Tips (PDF + WhatsApp)
-# =============================
-def top_tips_to_pdf_bytes(
-    picks: List[Dict],
-    date_str: str,
-    location: str = "Inhassoro",
-    author: str = "By Nzualo",
-) -> bytes:
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    w, h = A4
-
-    y = h - 50
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(40, y, "Top Tips do Dia")
-    y -= 18
-
-    c.setFont("Helvetica", 10)
-    c.drawString(40, y, f"Data: {date_str}   |   Local: {location}   |   {author}")
-    y -= 14
-    c.setFont("Helvetica", 9)
-    c.drawString(40, y, "Nota: Probabilidades estatísticas, sem garantias. Aposte com responsabilidade.")
-    y -= 22
-
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(40, y, "Hora")
-    c.drawString(90, y, "Liga")
-    c.drawString(260, y, "Jogo")
-    c.drawString(470, y, "Pick (Odd)")
-    y -= 12
-
-    c.setLineWidth(0.3)
-    c.line(40, y, w - 40, y)
-    y -= 14
-
-    c.setFont("Helvetica", 9)
-
-    def _short_local(s: str, n: int) -> str:
-        s = (s or "").strip()
-        return s if len(s) <= n else s[: n - 3] + "..."
-
-    for p in picks:
-        if y < 80:
-            c.showPage()
-            y = h - 50
-            c.setFont("Helvetica", 9)
-
-        time_ = p.get("time", "??:??")
-        league = _short_local(p.get("league", ""), 26)
-        match = _short_local(p.get("match", ""), 34)
-        pick = _short_local(p.get("pick", ""), 26)
-        odd = float(p.get("odd") or 0.0)
-
-        c.drawString(40, y, str(time_))
-        c.drawString(90, y, str(league))
-        c.drawString(260, y, str(match))
-        c.drawString(470, y, f"{pick} ({odd:.2f})")
-        y -= 14
-
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(40, 50, "WhatsApp: +258867926665")
-    c.save()
-
-    buf.seek(0)
-    return buf.read()
-
-
-def top_tips_whatsapp_text(picks: List[Dict], date_str: str) -> str:
-    lines = []
-    lines.append(f"Top Tips do Dia — {date_str}")
-    lines.append("Local: Inhassoro")
-    lines.append("")
-    for i, p in enumerate(picks, start=1):
-        lines.append(
-            f"{i}) {p.get('time','??:??')} | {p.get('league','Liga')} | {p.get('match','Jogo')} | {p.get('pick','Pick')} @ {float(p.get('odd') or 0):.2f}"
-        )
-    lines.append("")
-    lines.append("Nota: probabilidades, sem garantias. Aposte com responsabilidade.")
-    lines.append("By Nzualo")
-    return "\n".join(lines)
 
 
 # =============================
@@ -964,7 +961,7 @@ def build_picks_for_market(
                 odd_x2 = odds_allsports_market(odds_row, "odd_x2")
                 odd_12 = odds_allsports_market(odds_row, "odd_12")
 
-                for dc_name, p_dc, odd_dc in [("1X", p_1x, odd_1x), ("X2", p_x2, odd_x2 distributions), ("12", p_12, odd_12)]:
+                for dc_name, p_dc, odd_dc in [("1X", p_1x, odd_1x), ("X2", p_x2, odd_x2), ("12", p_12, odd_12)]:
                     if not odd_dc or odd_dc < min_odd:
                         continue
                     p_combo = clamp(p_dc * p_over, 0.0, 1.0)
@@ -1008,179 +1005,17 @@ def build_picks_for_market(
         picks,
         key=lambda x: (-999 if x.get("edge") is None else -x["edge"], -x.get("prob", 0.0)),
     )[:max_picks]
+
     return picks
 
 
-# =============================
-# TOP TIPS (PRO scoring)
-# =============================
-def build_top_tips(
-    fixtures: List[Dict],
-    last_n_form: int,
-    home_adv: float,
-    min_odd: float,
-    zebra_min_odd: float,
-    top_n: int,
-    tips_min_odd: float,
-    tips_max_odd: float,
-    pro_mode: bool,
-) -> List[Dict]:
-    markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5"]
-
-    pbar = st.progress(0)
-    ptxt = st.empty()
-    all_candidates: List[Dict] = []
-
-    for i, m in enumerate(markets, start=1):
-        pbar.progress(int((i - 1) * 100 / len(markets)))
-        ptxt.markdown(f"<div class='ptext'>A gerar candidatos: {m} ({i}/{len(markets)})...</div>", unsafe_allow_html=True)
-
-        cand = build_picks_for_market(
-            fixtures=fixtures,
-            market=m,
-            last_n_form=last_n_form,
-            home_adv=home_adv,
-            one_per_league=False,
-            min_odd=min_odd,
-            zebra_min_odd=zebra_min_odd,
-            max_picks=60 if pro_mode else 50,
-            progress_cb=None,
-        )
-        all_candidates.extend(cand)
-
-    pbar.progress(100)
-    ptxt.markdown("<div class='ptext'>A filtrar odds e selecionar Top Tips...</div>", unsafe_allow_html=True)
-
-    all_candidates = [
-        p for p in all_candidates
-        if (p.get("odd") is not None) and (tips_min_odd <= float(p["odd"]) <= tips_max_odd)
-    ]
-
-    def ev_w(ev: str) -> float:
-        ev = (ev or "").upper().strip()
-        if ev == "ALTA":
-            return 1.0
-        if ev == "MÉDIA":
-            return 0.6
-        return 0.25
-
-    def score_free(p: Dict) -> float:
-        edge = float(p.get("edge") or 0.0)
-        prob = float(p.get("prob") or 0.0)
-        return (1.8 * edge) + (0.9 * prob) + (0.5 * ev_w(p.get("ev", "BAIXA")))
-
-    def score_pro(p: Dict) -> float:
-        # PRO: penaliza odds altas dentro do intervalo, e premia "evidência"
-        edge = float(p.get("edge") or 0.0)
-        prob = float(p.get("prob") or 0.0)
-        odd = float(p.get("odd") or 0.0)
-        ev = ev_w(p.get("ev", "BAIXA"))
-        # Preferir odds mais baixas (mais seguras) dentro do range
-        odd_penalty = clamp((odd - tips_min_odd) / max(0.01, (tips_max_odd - tips_min_odd)), 0.0, 1.0)
-        return (2.1 * edge) + (1.1 * prob) + (0.8 * ev) - (0.35 * odd_penalty)
-
-    all_candidates = sorted(all_candidates, key=(score_pro if pro_mode else score_free), reverse=True)
-
-    final: List[Dict] = []
-    used_leagues = set()
-    used_fixtures = set()
-    for c in all_candidates:
-        lid = c.get("league_id")
-        fid = c.get("fixture_id")
-        if lid in used_leagues:
-            continue
-        if fid in used_fixtures:
-            continue
-        final.append(c)
-        used_leagues.add(lid)
-        used_fixtures.add(fid)
-        if len(final) >= top_n:
-            break
-
-    ptxt.markdown("<div class='ptext'>Concluído.</div>", unsafe_allow_html=True)
-    return final
-
-
-# =============================
-# Premium: Multi-bet Builder
-# =============================
-def build_multibet(
-    picks: List[Dict],
-    min_legs: int,
-    max_legs: int,
-    target_min_odds: float,
-    target_max_odds: float,
-) -> List[Dict]:
-    """
-    Usa os Top Tips já gerados e propõe combinações 2–4 picks.
-    Regra: não repetir mesma fixture.
-    """
-    if not picks:
-        return []
-
-    # ordena por qualidade (edge, prob)
-    picks_sorted = sorted(picks, key=lambda x: ((x.get("edge") or -999), (x.get("prob") or 0.0)), reverse=True)
-
-    combos = []
-    # geração simples (rápida)
-    for legs in range(min_legs, max_legs + 1):
-        # pega os melhores N e faz combinações lineares (sem explodir)
-        pool = picks_sorted[: min(20, len(picks_sorted))]
-        n = len(pool)
-
-        def ok_unique_fixture(combo):
-            fids = [c.get("fixture_id") for c in combo]
-            return len(fids) == len(set(fids))
-
-        # combinações "greedy": pega base e tenta completar
-        for i in range(n):
-            combo = [pool[i]]
-            for j in range(n):
-                if j == i:
-                    continue
-                if len(combo) >= legs:
-                    break
-                candidate = pool[j]
-                if candidate.get("fixture_id") in {c.get("fixture_id") for c in combo}:
-                    continue
-                combo.append(candidate)
-
-            if len(combo) != legs:
-                continue
-            if not ok_unique_fixture(combo):
-                continue
-
-            total_odds = 1.0
-            avg_prob = 0.0
-            for c in combo:
-                total_odds *= float(c.get("odd") or 1.0)
-                avg_prob += float(c.get("prob") or 0.0)
-            avg_prob /= legs
-
-            if target_min_odds <= total_odds <= target_max_odds:
-                combos.append(
-                    {
-                        "legs": legs,
-                        "total_odds": total_odds,
-                        "avg_prob": avg_prob,
-                        "items": combo,
-                    }
-                )
-
-    combos = sorted(combos, key=lambda x: (x["avg_prob"], -x["total_odds"]), reverse=True)
-    return combos[:10]
-
-
-# =============================
-# Render
-# =============================
-def render_picks(picks: List[Dict], ai_enabled: bool, ai_risk_enabled: bool, ai_max: int, allow_fav: bool):
+def render_picks(picks: List[Dict], ai_enabled: bool, ai_max: int):
     if not picks:
         st.info("Sem picks que passem nos filtros (ou odds indisponíveis).")
         return
 
     ai_count = 0
-    for idx, p in enumerate(picks, start=1):
+    for p in picks:
         edge = p.get("edge")
         edge_txt = f"{edge*100:.1f}%" if edge is not None else "n/a"
 
@@ -1198,11 +1033,6 @@ def render_picks(picks: List[Dict], ai_enabled: bool, ai_risk_enabled: bool, ai_
 """,
             unsafe_allow_html=True,
         )
-
-        if allow_fav:
-            if st.button("⭐ Guardar nos Favoritos", key=f"fav_{p.get('fixture_id')}_{idx}"):
-                add_to_favorites(p)
-                st.success("Guardado.")
 
         if ai_enabled:
             if ai_count < ai_max:
@@ -1225,30 +1055,186 @@ def render_picks(picks: List[Dict], ai_enabled: bool, ai_risk_enabled: bool, ai_
                     st.markdown(f"<div class='ai-box'>{txt}</div>", unsafe_allow_html=True)
                 ai_count += 1
             else:
-                st.markdown("<div class='small'>IA: limite de explicações/alertas desta aba atingido.</div>", unsafe_allow_html=True)
+                st.markdown("<div class='small'>IA: limite de explicações desta aba atingido.</div>", unsafe_allow_html=True)
 
-            if ai_risk_enabled:
-                if ai_count < ai_max:
-                    with st.expander("🛑 IA: Quando NÃO apostar (alerta de risco)"):
-                        with st.spinner("A gerar alertas de risco..."):
-                            risk = ai_risk_note_cached(
-                                league=p["league"],
-                                match=p["match"],
-                                market=p.get("market", ""),
-                                pick_name=p["pick"],
-                                time_str=p["time"],
-                                prob=float(p["prob"]),
-                                odd=float(p["odd"]),
-                                fair=float(p["fair"]),
-                                edge=p.get("edge"),
-                                ev=p.get("ev", ""),
-                                lam_h=float(p["lam"][0]),
-                                lam_a=float(p["lam"][1]),
-                            )
-                        st.markdown(f"<div class='ai-box'>{risk}</div>", unsafe_allow_html=True)
-                    ai_count += 1
+
+# =============================
+# TOP TIPS
+# =============================
+def build_top_tips(
+    fixtures: List[Dict],
+    last_n_form: int,
+    home_adv: float,
+    min_odd: float,
+    zebra_min_odd: float,
+    top_n: int,
+    tips_min_odd: float,
+    tips_max_odd: float,
+) -> List[Dict]:
+    markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5"]
+
+    pbar = st.progress(0)
+    ptxt = st.empty()
+    all_candidates: List[Dict] = []
+
+    for i, m in enumerate(markets, start=1):
+        pbar.progress(int((i - 1) * 100 / len(markets)))
+        ptxt.markdown(f"<div class='ptext'>A gerar candidatos: {m} ({i}/{len(markets)})...</div>", unsafe_allow_html=True)
+        cand = build_picks_for_market(
+            fixtures=fixtures,
+            market=m,
+            last_n_form=last_n_form,
+            home_adv=home_adv,
+            one_per_league=False,
+            min_odd=min_odd,
+            zebra_min_odd=zebra_min_odd,
+            max_picks=50,
+            progress_cb=None,
+        )
+        all_candidates.extend(cand)
+
+    pbar.progress(100)
+    ptxt.markdown("<div class='ptext'>A filtrar odds e selecionar Top Tips...</div>", unsafe_allow_html=True)
+
+    all_candidates = [
+        p for p in all_candidates
+        if (p.get("odd") is not None) and (tips_min_odd <= float(p["odd"]) <= tips_max_odd)
+    ]
+
+    def ev_w(ev: str) -> float:
+        ev = (ev or "").upper().strip()
+        if ev == "ALTA":
+            return 1.0
+        if ev == "MÉDIA":
+            return 0.6
+        return 0.25
+
+    def score(p: Dict) -> float:
+        edge = float(p.get("edge") or 0.0)
+        prob = float(p.get("prob") or 0.0)
+        return (1.8 * edge) + (0.9 * prob) + (0.5 * ev_w(p.get("ev", "BAIXA")))
+
+    all_candidates = sorted(all_candidates, key=score, reverse=True)
+
+    final: List[Dict] = []
+    used_leagues = set()
+    for c in all_candidates:
+        lid = c.get("league_id")
+        if lid in used_leagues:
+            continue
+        final.append(c)
+        used_leagues.add(lid)
+        if len(final) >= top_n:
+            break
+
+    ptxt.markdown("<div class='ptext'>Concluído.</div>", unsafe_allow_html=True)
+    return final
+
+
+# =============================
+# VIP box (M-Pesa / e-Mola)
+# =============================
+def vip_box_sidebar():
+    st.subheader("VIP Semanal")
+    st.caption(f"Preço: {VIP_PRICE_MZN:.0f} MT | Duração: {VIP_DAYS} dias")
+
+    if not supabase_enabled():
+        st.warning("VIP precisa do Supabase (SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY).")
+        return
+
+    uid = user_id()
+    currently_vip = is_vip_now(uid)
+    st.session_state["is_vip"] = bool(currently_vip)
+
+    if currently_vip:
+        st.success("Estado: VIP ATIVO")
+        vu = sb_get_entitlement(uid)
+        if vu:
+            st.caption(f"VIP até: {vu}")
+        st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
+        return
+
+    st.info("Estado: FREE")
+    st.markdown(
+        f"""
+**Pagamentos Mobile Money (manual):**  
+- **M-Pesa:** 841836671  
+- **e-Mola:** 867926665  
+**Nome:** Candido Albino Nzualo  
+
+Depois de pagar **{VIP_PRICE_MZN:.0f} MT**, envie a **referência/ID** aqui para aprovação.
+""".strip()
+    )
+
+    provider = st.selectbox("Via", ["mpesa", "emola"], index=0)
+    reference = st.text_input("Referência/Transação (ID)", placeholder="Ex: MP1234ABC...")
+    if st.button("Enviar para aprovação (VIP)"):
+        ref = (reference or "").strip()
+        if len(ref) < 4:
+            st.error("Referência muito curta.")
+        else:
+            ok = sb_insert_payment(uid, provider=provider, amount=float(VIP_PRICE_MZN), reference=ref, status="pending")
+            if ok:
+                st.success("Pedido enviado. Aguarde aprovação.")
+            else:
+                st.error("Falha ao enviar. Verifique Supabase/Secrets.")
+
+
+# =============================
+# Admin panel
+# =============================
+def admin_panel():
+    st.markdown("## Painel Admin — Aprovar VIP (M-Pesa / e-Mola)")
+    st.caption("Aprovar = marca pagamento como PAID e adiciona VIP por 7 dias.")
+
+    if not supabase_enabled():
+        st.error("Supabase não configurado.")
+        return
+
+    pending = sb_list_pending_payments(limit=80)
+    if not pending:
+        st.info("Sem pagamentos pendentes.")
+        return
+
+    for row in pending:
+        pid = row.get("id")
+        uid = row.get("user_id")
+        provider = row.get("provider")
+        amount = row.get("amount")
+        ref = row.get("reference") or ""
+        created = row.get("created_at") or ""
+
+        st.markdown(
+            f"""
+<div class="admin-card">
+<b>ID:</b> {pid} &nbsp; | &nbsp; <b>Via:</b> {provider} &nbsp; | &nbsp; <b>Valor:</b> {amount} MT<br/>
+<b>User:</b> {uid}<br/>
+<b>Ref:</b> {ref}<br/>
+<span class="small">{created}</span>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            if st.button("✅ Aprovar", key=f"ap_{pid}"):
+                ok1 = sb_mark_payment_paid(int(pid))
+                ok2 = grant_vip_7_days(str(uid))
+                if ok1 and ok2:
+                    st.success(f"Aprovado. VIP ativado para {uid}.")
+                    st.rerun()
                 else:
-                    st.markdown("<div class='small'>IA: limite de explicações/alertas desta aba atingido.</div>", unsafe_allow_html=True)
+                    st.error("Falha ao aprovar (verifique logs/permissions).")
+
+        with c2:
+            if st.button("❌ Rejeitar", key=f"rj_{pid}"):
+                ok = sb_mark_payment_rejected(int(pid))
+                if ok:
+                    st.warning("Rejeitado.")
+                    st.rerun()
+                else:
+                    st.error("Falha ao rejeitar.")
 
 
 # =============================
@@ -1257,12 +1243,14 @@ def render_picks(picks: List[Dict], ai_enabled: bool, ai_risk_enabled: bool, ai_
 def main():
     now_local = datetime.now(LOCAL_TZ)
 
-    if "is_premium" not in st.session_state:
-        st.session_state["is_premium"] = False
+    if "is_vip" not in st.session_state:
+        st.session_state["is_vip"] = False
     if "_sid_fallback" not in st.session_state:
         st.session_state["_sid_fallback"] = hashlib.md5(str(datetime.utcnow().timestamp()).encode()).hexdigest()[:10]
 
-    _ensure_session_lists()
+    # Revalida VIP no início
+    if supabase_enabled():
+        st.session_state["is_vip"] = is_vip_now(user_id())
 
     st.markdown(
         f"""
@@ -1282,7 +1270,7 @@ def main():
 
   <div>
     <span class="barca-sign">By Nzualo</span>
-    <a class="barca-wa" href="https://wa.me/258867926665?text=Quero%20ativar%20o%20Premium%20do%20app%20de%20palpites.%20Como%20fa%C3%A7o%3F"
+    <a class="barca-wa" href="https://wa.me/258867926665?text=Quero%20ativar%20o%20VIP%20semanal%20(50MT).%20Como%20fa%C3%A7o%3F"
        target="_blank" rel="noopener noreferrer">WhatsApp</a>
   </div>
 </div>
@@ -1290,37 +1278,33 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # ---------------- Sidebar
     with st.sidebar:
-        st.subheader("Acesso")
-
-        if is_premium():
-            st.markdown("<span class='premium-pill'>Modo: PREMIUM</span>", unsafe_allow_html=True)
-            if st.button("Sair do Premium"):
-                premium_logout()
-                st.success("Premium desativado nesta sessão.")
+        st.subheader("Modo")
+        if st.session_state.get("is_vip", False):
+            st.markdown("<span class='premium-pill'>Modo: VIP</span>", unsafe_allow_html=True)
         else:
             st.markdown("<span class='free-pill'>Modo: FREE</span>", unsafe_allow_html=True)
 
-        codes = get_premium_codes()
-        if codes:
-            code = st.text_input("Código Premium", type="password", placeholder="Ex: NZUALO30")
-            if st.button("Ativar Premium"):
-                if premium_activate(code or ""):
-                    st.success("Premium ativado.")
-                else:
-                    st.error("Código inválido.")
-        else:
-            st.info("Premium ainda não configurado (adicione PREMIUM_CODES nos Secrets).")
+        # VIP box (pagamento e submissão de referência)
+        vip_box_sidebar()
 
         st.markdown("---")
 
-        if not is_premium():
+        # Admin unlock + Admin panel link
+        admin_unlock_box()
+        if is_admin():
+            st.success("Acesso Admin ativo.")
+            if st.button("Abrir Painel Admin"):
+                st.session_state["open_admin"] = True
+        else:
+            st.session_state["open_admin"] = False
+
+        st.markdown("---")
+
+        if not st.session_state.get("is_vip", False):
             rem = free_remaining_today()
             st.warning(f"FREE: {rem} de {FREE_MAX_GENERATES_PER_DAY} gerações restantes hoje.")
             st.caption("Ao virar o dia (hora de Moçambique), renova automaticamente.")
-        else:
-            st.success("Premium: gerações ilimitadas + recursos PRO.")
 
         st.subheader("Configuração")
         auto_tomorrow_if_empty = st.checkbox("Se hoje não tiver jogos futuros, usar amanhã", value=True)
@@ -1341,48 +1325,34 @@ def main():
         zebra_min_odd = st.number_input("Odd mínima (zebras)", value=4.00, min_value=2.00, step=0.10)
 
         st.divider()
-        st.subheader("Recursos Premium")
+        st.subheader("IA (VIP)")
+        ai_enabled = st.checkbox("Ativar IA para explicar picks", value=True)
 
-        # Top Tips PRO
-        pro_tips = st.checkbox("⭐ Top Tips PRO (ranking melhor)", value=True, disabled=not is_premium())
-        if not is_premium():
-            st.caption("Top Tips PRO: apenas Premium.")
+        if not st.session_state.get("is_vip", False) and ai_enabled:
+            ai_enabled = False
+            st.info("IA é recurso VIP.")
 
-        # Multi-bet
-        multibet_on = st.checkbox("🎯 Multi-bet Builder (2–4 legs)", value=True, disabled=not is_premium())
-        if not is_premium():
-            st.caption("Multi-bet: apenas Premium.")
-
-        st.divider()
-        st.subheader("IA (Premium)")
-        ai_enabled = st.checkbox("Ativar IA para explicar picks", value=True, disabled=not is_premium())
-        ai_risk_enabled = st.checkbox("IA: Alertas de risco (quando NÃO apostar)", value=True, disabled=not is_premium())
-
-        # Boost de performance Premium (mais IA por aba)
-        if is_premium():
-            ai_max = st.slider("Máx. explicações/alertas por aba", 2, 16, 8, 1)
-        else:
-            ai_max = 0
+        ai_max = st.slider("Máx. explicações por aba", 1, 10, 5, 1)
 
         ai_ok = True
-        if (ai_enabled or ai_risk_enabled) and not st.secrets.get("OPENAI_API_KEY"):
+        if ai_enabled and not st.secrets.get("OPENAI_API_KEY"):
             ai_ok = False
             st.warning("IA ativada, mas falta OPENAI_API_KEY nos Secrets.")
 
         debug = st.checkbox("Mostrar diagnóstico (debug)", value=False)
 
+    # Se Admin aberto, mostra painel acima das abas
+    if st.session_state.get("open_admin", False) and is_admin():
+        admin_panel()
         st.markdown("---")
-        if is_premium():
-            st.markdown("<div class='kpi'><b>Premium ativo</b><br/>Top Tips PRO • IA • Export • Multi-bet • Histórico/Favoritos</div>", unsafe_allow_html=True)
-        else:
-            st.markdown("<div class='kpi'><b>FREE</b><br/>3 gerações/dia • Sem IA • Sem export • Sem Multi-bet</div>", unsafe_allow_html=True)
 
-    # ---------------- Fixtures
+    # Fixtures
     date_to_use = now_local.date()
     date_str = date_to_use.strftime("%Y-%m-%d")
     fixtures_raw = get_fixtures_by_date(date_str)
     fixtures = [fx for fx in fixtures_raw if is_future_fixture(fx, now_local)]
 
+    # Amanhã se não houver futuros (mas houver jogos no dia)
     if auto_tomorrow_if_empty and (len(fixtures_raw) > 0) and (len(fixtures) == 0):
         date_to_use = (now_local + timedelta(days=1)).date()
         date_str = date_to_use.strftime("%Y-%m-%d")
@@ -1408,9 +1378,9 @@ def main():
     st.markdown(f"🗓️ Data analisada: <span class='badge'>{date_to_use.strftime('%d/%m/%Y')}</span>", unsafe_allow_html=True)
     st.caption(f"Pool final: {len(fixtures)} jogos | Máx. ligas: {max_leagues}")
 
-    tabs = st.tabs(["⭐ Top Tips", "🎯 Multi-bet", "📌 Favoritos", "🕘 Histórico", "🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "👥 DC+O1.5", "👥 DC+O2.5", "🟣 Zebras"])
+    tabs = st.tabs(["⭐ Top Tips", "🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "👥 DC+O1.5", "👥 DC+O2.5", "🟣 Zebras"])
 
-    # ---------------- Top Tips
+    # Top Tips
     with tabs[0]:
         st.subheader("⭐ Top Tips do Dia (odds moderadas)")
         st.caption(f"Filtro: odds entre {tips_min_odd:.2f} e {tips_max_odd:.2f}")
@@ -1427,109 +1397,16 @@ def main():
                 top_n=top_tips_n,
                 tips_min_odd=float(tips_min_odd),
                 tips_max_odd=float(tips_max_odd),
-                pro_mode=(is_premium() and pro_tips),
             )
             st.session_state["toptips"] = tips
-            add_to_history("Top Tips", tips)
 
-        if disabled and not is_premium():
-            st.warning("Limite FREE diário atingido (3 gerações hoje). Ative Premium para ilimitado.")
+        if disabled and not st.session_state.get("is_vip", False):
+            st.warning("Limite FREE diário atingido (3 gerações hoje). Ative VIP para ilimitado.")
 
-        tips_list = st.session_state.get("toptips", [])
+        render_picks(st.session_state.get("toptips", []), ai_enabled=ai_enabled and ai_ok, ai_max=ai_max)
 
-        # Export (Premium)
-        if tips_list:
-            st.markdown("### 📤 Exportar Top Tips")
-            if not is_premium():
-                st.info("Export é recurso Premium.")
-            else:
-                colA, colB = st.columns([1, 1])
-                with colA:
-                    pdf_bytes = top_tips_to_pdf_bytes(
-                        picks=tips_list,
-                        date_str=date_to_use.strftime("%d/%m/%Y"),
-                        location="Inhassoro",
-                        author="By Nzualo",
-                    )
-                    st.download_button(
-                        label="📄 Baixar Top Tips em PDF",
-                        data=pdf_bytes,
-                        file_name=f"top_tips_{date_to_use.strftime('%Y-%m-%d')}.pdf",
-                        mime="application/pdf",
-                    )
-                with colB:
-                    wa_text = top_tips_whatsapp_text(tips_list, date_to_use.strftime("%d/%m/%Y"))
-                    st.text_area("Texto pronto para WhatsApp (copiar e colar)", value=wa_text, height=190)
-
-        render_picks(
-            tips_list,
-            ai_enabled=(is_premium() and ai_ok and ai_enabled),
-            ai_risk_enabled=(is_premium() and ai_ok and ai_risk_enabled),
-            ai_max=ai_max,
-            allow_fav=is_premium(),
-        )
-
-    # ---------------- Multi-bet (Premium)
-    with tabs[1]:
-        st.subheader("🎯 Multi-bet Builder (Premium)")
-        if not is_premium():
-            st.info("Este recurso é Premium. Ative Premium para ver combinações 2–4 picks.")
-        else:
-            tips_list = st.session_state.get("toptips", [])
-            if not tips_list:
-                st.warning("Primeiro gere os ⭐ Top Tips, depois volte aqui.")
-            else:
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    min_legs = st.slider("Mín legs", 2, 4, 2, 1)
-                with col2:
-                    max_legs = st.slider("Máx legs", 2, 4, 3, 1)
-                with col3:
-                    target_min = st.number_input("Odd total mínima", value=2.20, min_value=1.10, step=0.10)
-                    target_max = st.number_input("Odd total máxima", value=6.00, min_value=1.20, step=0.10)
-
-                if st.button("Gerar Multi-bets"):
-                    combos = build_multibet(tips_list, min_legs, max_legs, target_min, target_max)
-                    st.session_state["multibets"] = combos
-
-                combos = st.session_state.get("multibets", [])
-                if not combos:
-                    st.caption("Sem combinações ainda. Clique em 'Gerar Multi-bets'.")
-                else:
-                    for k, c in enumerate(combos, start=1):
-                        st.markdown(f"**Combo {k}** — Legs: {c['legs']} | Odd total: **{c['total_odds']:.2f}** | Prob média: **{c['avg_prob']:.3f}**")
-                        for it in c["items"]:
-                            st.write(f"- {it['time']} | {it['league']} | {it['match']} | {it['pick']} @ {float(it['odd']):.2f}")
-
-    # ---------------- Favoritos (Premium)
-    with tabs[2]:
-        st.subheader("📌 Favoritos (Premium)")
-        if not is_premium():
-            st.info("Favoritos é recurso Premium.")
-        else:
-            favs = st.session_state.get("favorites", [])
-            if not favs:
-                st.caption("Nenhum favorito ainda. Abra um pick e clique em ⭐ Guardar.")
-            else:
-                render_picks(favs, ai_enabled=False, ai_risk_enabled=False, ai_max=0, allow_fav=False)
-
-    # ---------------- Histórico (Premium)
-    with tabs[3]:
-        st.subheader("🕘 Histórico (Premium)")
-        if not is_premium():
-            st.info("Histórico é recurso Premium.")
-        else:
-            hist = st.session_state.get("history", [])
-            if not hist:
-                st.caption("Sem histórico ainda. Gere Top Tips ou mercados para registrar.")
-            else:
-                for h in hist:
-                    with st.expander(f"{h['ts']} — {h['tab']} ({len(h['picks'])} picks)"):
-                        render_picks(h["picks"], ai_enabled=False, ai_risk_enabled=False, ai_max=0, allow_fav=False)
-
-    # ---------------- Markets
     markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5", "Zebras"]
-    for tab, market in zip(tabs[4:], markets):
+    for tab, market in zip(tabs[1:], markets):
         with tab:
             st.subheader(f"Mercado: {market}")
             col1, col2 = st.columns([1, 2])
@@ -1559,27 +1436,19 @@ def main():
                         progress_cb=cb,
                     )
                     st.session_state[f"picks_{market}"] = picks
-                    add_to_history(market, picks)
-
                     pbar.progress(100)
                     ptxt.markdown("<div class='ptext'>Concluído.</div>", unsafe_allow_html=True)
 
-                if disabled and not is_premium():
-                    st.warning("Limite FREE diário atingido (3 gerações hoje). Ative Premium para ilimitado.")
+                if disabled and not st.session_state.get("is_vip", False):
+                    st.warning("Limite FREE diário atingido (3 gerações hoje). Ative VIP para ilimitado.")
 
             with col2:
-                if is_premium():
-                    st.write("Premium: gerações ilimitadas + IA + export + multi-bet + histórico.")
+                if st.session_state.get("is_vip", False):
+                    st.write("VIP: gerações ilimitadas, IA disponível (se habilitada).")
                 else:
                     st.write(f"Free: restantes hoje: {free_remaining_today()}/{FREE_MAX_GENERATES_PER_DAY}.")
 
-            render_picks(
-                st.session_state.get(f"picks_{market}", []),
-                ai_enabled=(is_premium() and ai_ok and ai_enabled),
-                ai_risk_enabled=(is_premium() and ai_ok and ai_risk_enabled),
-                ai_max=ai_max,
-                allow_fav=is_premium(),
-            )
+            render_picks(st.session_state.get(f"picks_{market}", []), ai_enabled=ai_enabled and ai_ok, ai_max=ai_max)
 
 
 if __name__ == "__main__":
