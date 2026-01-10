@@ -9,10 +9,10 @@ import requests
 import streamlit as st
 
 # =============================
-# OPTIONAL: Continuous clock refresh
+# OPTIONAL: clock refresh
 # =============================
 try:
-    from streamlit_autorefresh import st_autorefresh  # pip install streamlit-autorefresh
+    from streamlit_autorefresh import st_autorefresh
     HAS_AUTOREFRESH = True
 except Exception:
     HAS_AUTOREFRESH = False
@@ -27,21 +27,24 @@ except Exception:
     HAS_OPENAI = False
 
 # =============================
-# SESSION STATE
-# =============================
-if "pause_refresh" not in st.session_state:
-    st.session_state["pause_refresh"] = False
-
-# =============================
 # CONFIG
 # =============================
 LOCAL_TZ = pytz.timezone("Africa/Maputo")
+LOCAL_TZ_NAME = "Africa/Maputo"
 API_SPORTS_BASE = "https://v3.football.api-sports.io"
 
 st.set_page_config(page_title="Melhores Palpites do Dia", layout="wide")
 
 # =============================
-# CSS / Design
+# Session
+# =============================
+if "pause_refresh" not in st.session_state:
+    st.session_state["pause_refresh"] = False
+if "rows_1x2" not in st.session_state:
+    st.session_state["rows_1x2"] = []
+
+# =============================
+# CSS
 # =============================
 st.markdown(
     """
@@ -83,7 +86,6 @@ a.whatsapp {
   background: rgba(0,255,0,0.16); color: #eaffea;
 }
 a.whatsapp:hover { background: rgba(0,255,0,0.24); }
-div[data-baseweb="tab-list"] { gap: 6px; }
 .smallnote { color:#aab6c5; font-size: 0.85rem; margin-top: 6px; }
 </style>
 """,
@@ -91,7 +93,7 @@ div[data-baseweb="tab-list"] { gap: 6px; }
 )
 
 # =============================
-# Secrets helpers (anti-crash)
+# Secrets helpers
 # =============================
 def _sec_required(name: str) -> str:
     v = st.secrets.get(name)
@@ -108,15 +110,8 @@ def has_secret(name: str) -> bool:
     return v is not None and str(v).strip() != ""
 
 # =============================
-# Utility
+# Utils
 # =============================
-def norm_team(s: str) -> str:
-    s = (s or "").lower().strip()
-    s = re.sub(r"[^\w\s]", " ", s)
-    s = re.sub(r"\b(fc|sc|cf|ac|cd|afc|cfc|fk|sk)\b", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
 def parse_iso_local(iso: str) -> Optional[datetime]:
     try:
         dt_utc = datetime.fromisoformat(iso.replace("Z", "+00:00"))
@@ -124,41 +119,47 @@ def parse_iso_local(iso: str) -> Optional[datetime]:
     except Exception:
         return None
 
-def match_event(home_a: str, away_a: str, t_a: Optional[datetime],
-                home_b: str, away_b: str, t_b: Optional[datetime],
-                tol_minutes: int = 120) -> bool:
-    if not t_a or not t_b:
-        return False
-    ha, aa = norm_team(home_a), norm_team(away_a)
-    hb, ab = norm_team(home_b), norm_team(away_b)
-    same = (ha == hb and aa == ab) or (ha == ab and aa == hb)
-    if not same:
-        return False
-    diff = abs(int((t_a - t_b).total_seconds() / 60))
-    return diff <= tol_minutes
+def norm_text(s: str) -> str:
+    s = (s or "").lower().strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
 
 # =============================
-# API 1: API-SPORTS (api-football.com / dashboard.api-football.com)
+# API-SPORTS
 # =============================
 def apisports_headers() -> Dict[str, str]:
     return {"x-apisports-key": _sec_required("APISPORTS_KEY")}
 
-def apisports_get(path: str, params: Dict[str, str], timeout: int = 15) -> Dict:
+def apisports_get(path: str, params: Dict[str, str], timeout: int = 18) -> Dict:
     r = requests.get(f"{API_SPORTS_BASE}{path}", headers=apisports_headers(), params=params, timeout=timeout)
     r.raise_for_status()
     return r.json()
 
+@st.cache_data(ttl=60 * 30)
+def apisports_leagues_current() -> List[Dict]:
+    # Lista ligas atuais para resolver IDs por nome (sem hardcode)
+    data = apisports_get("/leagues", {"current": "true"})
+    return data.get("response", []) or []
+
 @st.cache_data(ttl=60 * 10)
-def apisports_fixtures(date_yyyy_mm_dd: str) -> List[Dict]:
-    return (apisports_get("/fixtures", {"date": date_yyyy_mm_dd}).get("response") or [])
+def apisports_fixtures_by_date(date_yyyy_mm_dd: str) -> Dict:
+    # timezone Maputo ajuda a API a retornar datas corretamente
+    return apisports_get("/fixtures", {"date": date_yyyy_mm_dd, "timezone": LOCAL_TZ_NAME})
+
+@st.cache_data(ttl=60 * 10)
+def apisports_fixtures_window(from_yyyy_mm_dd: str, to_yyyy_mm_dd: str) -> Dict:
+    return apisports_get("/fixtures", {"from": from_yyyy_mm_dd, "to": to_yyyy_mm_dd, "timezone": LOCAL_TZ_NAME})
 
 @st.cache_data(ttl=60 * 60)
 def apisports_team_last(team_id: int, last: int = 10) -> List[Dict]:
-    return (apisports_get("/fixtures", {"team": str(team_id), "last": str(last), "status": "FT"}).get("response") or [])
+    data = apisports_get("/fixtures", {"team": str(team_id), "last": str(last), "status": "FT", "timezone": LOCAL_TZ_NAME})
+    return data.get("response", []) or []
 
+# Odds (API-SPORTS) – opcional, pode vir vazio no plano free
 @st.cache_data(ttl=60 * 10)
 def apisports_odds_fixture(fixture_id: int) -> List[Dict]:
-    return (apisports_get("/odds", {"fixture": str(fixture_id)}).get("response") or [])
+    data = apisports_get("/odds", {"fixture": str(fixture_id)})
+    return data.get("response", []) or []
 
 def apisports_extract_market(odds_resp: List[Dict], market_name: str, selection_value: str) -> Optional[float]:
     if not odds_resp:
@@ -175,101 +176,6 @@ def apisports_extract_market(odds_resp: List[Dict], market_name: str, selection_
     except Exception:
         pass
     return None
-
-# =============================
-# API 2: APIFootball (apifootball.com) - OPTIONAL
-# =============================
-@st.cache_data(ttl=60 * 10)
-def apifootball_odds_day(date_yyyy_mm_dd: str) -> List[Dict]:
-    if not has_secret("APIFOOTBALL_KEY"):
-        return []
-    base = _sec_optional("APIFOOTBALL_BASE", "https://apiv3.apifootball.com")
-    key = _sec_required("APIFOOTBALL_KEY")
-
-    r = requests.get(
-        f"{base}/",
-        params={"action": "get_odds", "from": date_yyyy_mm_dd, "to": date_yyyy_mm_dd, "APIkey": key},
-        timeout=20,
-    )
-    r.raise_for_status()
-    data = r.json()
-
-    out = []
-    if isinstance(data, list):
-        for it in data:
-            dt = None
-            try:
-                d = it.get("match_date")
-                t = it.get("match_time") or "00:00"
-                dt = LOCAL_TZ.localize(datetime.fromisoformat(f"{d} {t}")) if d else None
-            except Exception:
-                dt = None
-            out.append({
-                "home": it.get("match_hometeam_name") or it.get("home_team") or "",
-                "away": it.get("match_awayteam_name") or it.get("away_team") or "",
-                "time_local": dt,
-                "raw": it,
-            })
-    return out
-
-def apifootball_extract_1x2(raw: Dict) -> Dict[str, Optional[float]]:
-    it = raw.get("raw", raw)
-    for hk, dk, ak in [
-        ("odd_1", "odd_x", "odd_2"),
-        ("odds_home", "odds_draw", "odds_away"),
-        ("home_odds", "draw_odds", "away_odds"),
-    ]:
-        if it.get(hk) and it.get(dk) and it.get(ak):
-            return {"home": float(it[hk]), "draw": float(it[dk]), "away": float(it[ak])}
-    return {"home": None, "draw": None, "away": None}
-
-# =============================
-# API 3: AllSportsAPI (allsportsapi.com) - OPTIONAL
-# =============================
-@st.cache_data(ttl=60 * 10)
-def thirdapi_odds_day(date_yyyy_mm_dd: str) -> List[Dict]:
-    if not has_secret("THIRD_API_KEY"):
-        return []
-    base = _sec_optional("THIRD_API_BASE", "https://allsportsapi.com/api")
-    key = _sec_required("THIRD_API_KEY")
-
-    r = requests.get(
-        f"{base}/football/",
-        params={"met": "Odds", "APIkey": key, "from": date_yyyy_mm_dd, "to": date_yyyy_mm_dd},
-        timeout=20,
-    )
-    r.raise_for_status()
-    data = r.json()
-
-    out = []
-    result = data.get("result") if isinstance(data, dict) else None
-    if isinstance(result, list):
-        for it in result:
-            dt = None
-            try:
-                d = it.get("event_date") or it.get("match_date")
-                t = it.get("event_time") or it.get("match_time") or "00:00"
-                dt = LOCAL_TZ.localize(datetime.fromisoformat(f"{d} {t}")) if d else None
-            except Exception:
-                dt = None
-            out.append({
-                "home": it.get("event_home_team") or it.get("home_team") or "",
-                "away": it.get("event_away_team") or it.get("away_team") or "",
-                "time_local": dt,
-                "raw": it,
-            })
-    return out
-
-def thirdapi_extract_1x2(raw: Dict) -> Dict[str, Optional[float]]:
-    it = raw.get("raw", raw)
-    for hk, dk, ak in [
-        ("odd_1", "odd_x", "odd_2"),
-        ("home_odds", "draw_odds", "away_odds"),
-        ("odds_home", "odds_draw", "odds_away"),
-    ]:
-        if it.get(hk) and it.get(dk) and it.get(ak):
-            return {"home": float(it[hk]), "draw": float(it[dk]), "away": float(it[ak])}
-    return {"home": None, "draw": None, "away": None}
 
 # =============================
 # Model
@@ -385,21 +291,20 @@ def openai_client() -> Optional["OpenAI"]:
     return OpenAI(api_key=_sec_required("OPENAI_API_KEY"))
 
 @st.cache_data(ttl=60 * 60)
-def ai_explain(home: str, away: str, league: str, pick: str, prob: float, odd: Optional[float], lam_h: float, lam_a: float, ev: str) -> str:
+def ai_explain(home: str, away: str, league: str, pick: str, prob: float, odd: Optional[float], ev: str) -> str:
     c = openai_client()
     if c is None:
-        return "IA indisponível (verifique openai no requirements e OPENAI_API_KEY nos secrets)."
+        return "IA indisponível (confira requirements: openai, e OPENAI_API_KEY nos secrets)."
     odd_txt = f"{odd:.2f}" if odd is not None else "—"
     prompt = f"""
-Explique de forma curta e técnica (máx 6 linhas) este palpite. Não prometa ganhos.
+Explique este palpite em PT (máx 6 linhas), sem prometer ganhos.
 Jogo: {home} vs {away}
 Liga: {league}
 Pick: {pick}
-Probabilidade: {prob:.3f}
-Odd (se houver): {odd_txt}
-λ casa/fora: {lam_h:.2f}/{lam_a:.2f}
+Prob: {prob:.3f}
+Odd: {odd_txt}
 Evidência: {ev}
-Inclua: 2 razões quantitativas + 1 risco.
+Inclua 2 razões quantitativas + 1 risco.
 """
     r = c.chat.completions.create(
         model=_sec_optional("OPENAI_MODEL", "gpt-4o-mini"),
@@ -409,43 +314,56 @@ Inclua: 2 razões quantitativas + 1 risco.
     return (r.choices[0].message.content or "").strip()
 
 # =============================
-# Odds router (3 APIs)
+# TOP leagues resolver (10 ligas)
 # =============================
-def get_1x2_odds_for_fixture(fx: Dict, api2_odds: List[Dict], api3_odds: List[Dict]) -> Tuple[Dict[str, Optional[float]], str]:
-    home = fx["teams"]["home"]["name"]
-    away = fx["teams"]["away"]["name"]
-    t = parse_iso_local(fx["fixture"]["date"])
+TOP_LEAGUE_PATTERNS = [
+    # Europa
+    ("Premier League", ["premier league", "england"]),
+    ("La Liga", ["la liga", "spain"]),
+    ("Serie A", ["serie a", "italy"]),
+    ("Bundesliga", ["bundesliga", "germany"]),
+    ("Ligue 1", ["ligue 1", "france"]),
+    ("UEFA Champions League", ["uefa champions league"]),
+    # Américas
+    ("Brasileirão Série A", ["serie a", "brazil"]),
+    ("Argentina Primera", ["primera division", "argentina"]),
+    ("MLS", ["mls", "usa"]),
+    ("Copa Libertadores", ["copa libertadores", "libertadores"]),
+]
 
-    # 1) API-SPORTS
-    try:
-        oresp = apisports_odds_fixture(int(fx["fixture"]["id"]))
-        out = {
-            "home": apisports_extract_market(oresp, "Match Winner", "Home"),
-            "draw": apisports_extract_market(oresp, "Match Winner", "Draw"),
-            "away": apisports_extract_market(oresp, "Match Winner", "Away"),
-        }
-        if any(out.values()):
-            return out, "API-SPORTS"
-    except Exception:
-        pass
+def resolve_top_league_ids() -> Dict[str, int]:
+    """
+    Busca /leagues?current=true e tenta achar 1 liga por padrão.
+    Retorna: {nome_amigavel: league_id}
+    """
+    leagues = apisports_leagues_current()
+    out: Dict[str, int] = {}
 
-    # 2) APIFootball matching
-    if t and api2_odds:
-        for ev in api2_odds:
-            if match_event(home, away, t, ev["home"], ev["away"], ev["time_local"]):
-                out = apifootball_extract_1x2(ev)
-                if any(out.values()):
-                    return out, "APIFootball"
+    for friendly, keys in TOP_LEAGUE_PATTERNS:
+        want = [k.lower() for k in keys]
+        found_id = None
 
-    # 3) AllSports matching
-    if t and api3_odds:
-        for ev in api3_odds:
-            if match_event(home, away, t, ev["home"], ev["away"], ev["time_local"]):
-                out = thirdapi_extract_1x2(ev)
-                if any(out.values()):
-                    return out, "AllSportsAPI"
+        for item in leagues:
+            lg = item.get("league", {}) or {}
+            ct = item.get("country", {}) or {}
+            name = norm_text(lg.get("name", ""))
+            country = norm_text(ct.get("name", ""))
+            # string "alvo"
+            hay = f"{name} {country}"
 
-    return {"home": None, "draw": None, "away": None}, "—"
+            ok = True
+            for w in want:
+                if w not in hay:
+                    ok = False
+                    break
+            if ok:
+                found_id = lg.get("id")
+                break
+
+        if found_id:
+            out[friendly] = int(found_id)
+
+    return out
 
 # =============================
 # Render
@@ -463,7 +381,7 @@ def render_cards(rows: List[Dict], use_ai: bool):
         st.markdown(
             f"""
 <div class="card card-left">
-  <div class="meta"><b>{r['time']}</b> | <b>{r['league']}</b> | Odds: <b>{r['odds_source']}</b></div>
+  <div class="meta"><b>{r['time']}</b> | <b>{r['league']}</b></div>
   <div class="pickline"><b>{r['match']}</b></div>
   <div class="pickline">Pick: <b>{r['pick']}</b></div>
   <div class="kpi">
@@ -472,7 +390,6 @@ def render_cards(rows: List[Dict], use_ai: bool):
     <span>Justa: <b>{fair_txt}</b></span>
     <span>Edge: <b>{edge_txt}</b></span>
     <span>Evid.: <b>{r['ev']}</b></span>
-    <span>λ: <b>{r['lam_h']:.2f}-{r['lam_a']:.2f}</b></span>
   </div>
 </div>
 """,
@@ -481,13 +398,12 @@ def render_cards(rows: List[Dict], use_ai: bool):
 
         if use_ai:
             with st.expander("IA: análise", expanded=False):
-                st.write(ai_explain(r["home"], r["away"], r["league"], r["pick"], r["prob"], r["odd"], r["lam_h"], r["lam_a"], r["ev"]))
+                st.write(ai_explain(r["home"], r["away"], r["league"], r["pick"], r["prob"], r["odd"], r["ev"]))
 
 # =============================
 # MAIN
 # =============================
 def main():
-    # relógio contínuo (1s)
     if HAS_AUTOREFRESH and not st.session_state["pause_refresh"]:
         st_autorefresh(interval=1000, key="clock")
     else:
@@ -514,58 +430,93 @@ def main():
         st.write({
             "APISPORTS_KEY": has_secret("APISPORTS_KEY"),
             "OPENAI_API_KEY": has_secret("OPENAI_API_KEY"),
-            "APIFOOTBALL_KEY": has_secret("APIFOOTBALL_KEY"),
-            "THIRD_API_KEY": has_secret("THIRD_API_KEY"),
-            "APIFOOTBALL_BASE": _sec_optional("APIFOOTBALL_BASE", "https://apiv3.apifootball.com"),
-            "THIRD_API_BASE": _sec_optional("THIRD_API_BASE", "https://allsportsapi.com/api"),
+            "timezone_used": LOCAL_TZ_NAME,
         })
 
     with st.sidebar:
         st.subheader("Configuração")
-        auto_tomorrow = st.checkbox("Se hoje não tiver jogos futuros, usar amanhã", value=True)
-        max_picks = st.slider("Top picks", 5, 20, 10, 1)
+        modo = st.selectbox("Buscar jogos", ["Jogos do dia (Maputo)", "Próximas 24h"], index=0)
+        top_picks = st.slider("Top picks", 5, 20, 10, 1)
         last_n = st.slider("Forma (últimos FT)", 4, 20, 10, 1)
         home_adv = st.slider("Vantagem de casa", 1.00, 1.20, 1.08, 0.01)
         min_odd = st.number_input("Odd mínima (se houver)", value=1.30, min_value=1.01, step=0.01)
         use_ai = st.checkbox("IA ligada", value=HAS_OPENAI and has_secret("OPENAI_API_KEY"))
-        st.caption("Odds: tenta API-SPORTS → APIFootball → AllSports (fallback).")
 
-    # fixtures hoje/futuros (API-SPORTS)
-    date_use = now_local.date()
-    date_str = date_use.strftime("%Y-%m-%d")
-    fx = apisports_fixtures(date_str)
-    fx = [x for x in fx if parse_iso_local(x["fixture"]["date"]) and parse_iso_local(x["fixture"]["date"]) > now_local]
+        st.caption("Nota: odds podem vir vazias no plano free; o modelo ainda gera probabilidades.")
 
-    if not fx and auto_tomorrow:
-        date_use = (now_local + timedelta(days=1)).date()
-        date_str = date_use.strftime("%Y-%m-%d")
-        fx = apisports_fixtures(date_str)
-
-    if not fx:
-        st.error("Nenhum jogo encontrado.")
+    # Resolve TOP 10 ligas (IDs dinâmicos)
+    top_map = resolve_top_league_ids()
+    if not top_map:
+        st.error("Não consegui resolver as ligas TOP via /leagues. Verifique se a API-SPORTS está a responder.")
         return
 
-    # pools de odds (opcionais)
-    api2_odds = apifootball_odds_day(date_str)
-    api3_odds = thirdapi_odds_day(date_str)
+    # Permitir ao usuário ajustar as ligas (por padrão: 10)
+    default_names = list(top_map.keys())[:10]
+    selected_names = st.multiselect("TOP ligas/campeonatos (máx 10)", options=list(top_map.keys()), default=default_names)
+    selected_names = selected_names[:10]
+    selected_ids = {top_map[n] for n in selected_names}
 
-    with st.expander("Debug (quantidade de odds por fonte)", expanded=False):
+    # Buscar fixtures
+    fixtures_raw: List[Dict] = []
+    if modo == "Jogos do dia (Maputo)":
+        date_str = now_local.strftime("%Y-%m-%d")
+        raw = apisports_fixtures_by_date(date_str)
+        fixtures_raw = raw.get("response", []) or []
+    else:
+        from_str = now_local.strftime("%Y-%m-%d")
+        to_str = (now_local + timedelta(days=2)).strftime("%Y-%m-%d")
+        raw = apisports_fixtures_window(from_str, to_str)
+        fixtures_raw = raw.get("response", []) or []
+
+    # filtrar por ligas TOP
+    fixtures = []
+    for f in fixtures_raw:
+        try:
+            league_id = int(f["league"]["id"])
+        except Exception:
+            continue
+        if league_id in selected_ids:
+            fixtures.append(f)
+
+    # ordenar por hora
+    fixtures.sort(key=lambda x: (parse_iso_local(x["fixture"]["date"]) or datetime.max))
+
+    # debug simples
+    with st.expander("Debug fixtures", expanded=False):
         st.write({
-            "APIFootball odds events": len(api2_odds),
-            "AllSports odds events": len(api3_odds),
+            "modo": modo,
+            "fixtures_raw_total": len(fixtures_raw),
+            "fixtures_after_top_leagues": len(fixtures),
+            "top_leagues_selected": selected_names,
         })
+        if fixtures[:3]:
+            ex = []
+            for fx in fixtures[:3]:
+                dt = parse_iso_local(fx["fixture"]["date"])
+                ex.append({
+                    "league": fx["league"]["name"],
+                    "home": fx["teams"]["home"]["name"],
+                    "away": fx["teams"]["away"]["name"],
+                    "time_local": dt.strftime("%Y-%m-%d %H:%M:%S") if dt else None,
+                    "status": fx.get("fixture", {}).get("status", {}).get("short"),
+                })
+            st.write(ex)
 
-    st.markdown("<div class='smallnote'>Clique em Gerar para mostrar Top 10 1X2 (com probabilidades + odds quando existirem).</div>", unsafe_allow_html=True)
+    if not fixtures:
+        st.error("Nenhum jogo encontrado nas TOP ligas selecionadas. Troque para 'Próximas 24h' ou mude a lista de ligas.")
+        return
 
-    if st.button("Gerar Top 10 (1X2)", key="gen_1x2"):
+    st.markdown("<div class='smallnote'>Clique em Gerar para criar Top picks 1X2 (1 por jogo, baseado em probabilidades).</div>", unsafe_allow_html=True)
+
+    if st.button("Gerar Top Picks (1X2)", key="gen_1x2"):
         st.session_state["pause_refresh"] = True
-
         prog = st.progress(0)
         msg = st.empty()
-        rows = []
 
-        total = len(fx)
-        for i, f in enumerate(fx, start=1):
+        rows = []
+        total = min(len(fixtures), 60)  # limite de custo/tempo
+
+        for i, f in enumerate(fixtures[:total], start=1):
             prog.progress(int(i * 100 / total))
             msg.write(f"A analisar {i}/{total} jogos...")
 
@@ -576,6 +527,7 @@ def main():
             home = f["teams"]["home"]["name"]
             away = f["teams"]["away"]["name"]
             league = f["league"]["name"]
+
             home_id = int(f["teams"]["home"]["id"])
             away_id = int(f["teams"]["away"]["id"])
 
@@ -587,13 +539,26 @@ def main():
                 compute_team_form(away_id, away_last),
                 home_adv=home_adv,
             )
+
             pH, pD, pA = prob_1x2(lam_h, lam_a)
 
-            odds_1x2, source = get_1x2_odds_for_fixture(f, api2_odds, api3_odds)
+            # odds 1x2 via API-SPORTS (pode vir vazio)
+            odd_home = odd_draw = odd_away = None
+            try:
+                oresp = apisports_odds_fixture(int(f["fixture"]["id"]))
+                odd_home = apisports_extract_market(oresp, "Match Winner", "Home")
+                odd_draw = apisports_extract_market(oresp, "Match Winner", "Draw")
+                odd_away = apisports_extract_market(oresp, "Match Winner", "Away")
+            except Exception:
+                pass
 
-            # escolher melhor (com ou sem odd)
-            cands = [("Casa", pH, odds_1x2["home"]), ("Empate", pD, odds_1x2["draw"]), ("Fora", pA, odds_1x2["away"])]
+            cands = [
+                ("Casa", pH, odd_home),
+                ("Empate", pD, odd_draw),
+                ("Fora", pA, odd_away),
+            ]
 
+            # escolher melhor: se tiver odd respeita odd mínima; senão só prob
             best = None
             best_score = -1.0
             for nm, pr, od in cands:
@@ -623,16 +588,13 @@ def main():
                 "fair": fo,
                 "edge": edge,
                 "ev": ev,
-                "lam_h": lam_h,
-                "lam_a": lam_a,
-                "odds_source": source,
             })
 
         msg.write("Concluído.")
-        rows = sorted(rows, key=lambda r: (-(r["edge"] if r["edge"] is not None else -999), -r["prob"]))[:max_picks]
+        rows = sorted(rows, key=lambda r: (-(r["edge"] if r["edge"] is not None else -999), -r["prob"]))[:top_picks]
         st.session_state["rows_1x2"] = rows
 
-    render_cards(st.session_state.get("rows_1x2", []), use_ai=use_ai)
+    render_cards(st.session_state["rows_1x2"], use_ai=use_ai)
 
 
 if __name__ == "__main__":
