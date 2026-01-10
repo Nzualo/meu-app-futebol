@@ -1,3 +1,4 @@
+
 import math
 import time
 from datetime import datetime, timedelta
@@ -7,9 +8,11 @@ import pytz
 import requests
 import streamlit as st
 
-# Tenta usar autorefresh (melhor para relógio contínuo)
+# =============================
+# OPTIONAL: Continuous clock refresh
+# =============================
 try:
-    from streamlit_autorefresh import st_autorefresh
+    from streamlit_autorefresh import st_autorefresh  # pip install streamlit-autorefresh
     HAS_AUTOREFRESH = True
 except Exception:
     HAS_AUTOREFRESH = False
@@ -29,7 +32,6 @@ st.set_page_config(page_title="Melhores Palpites do Dia", layout="wide")
 st.markdown(
     """
 <style>
-/* Base */
 .main { background-color: #0b0f17; }
 .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
 h1, h2, h3, p, div, span { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
@@ -54,7 +56,7 @@ h1, h2, h3, p, div, span { font-family: ui-sans-serif, system-ui, -apple-system,
   color: #cdd6e0;
   font-size: 0.95rem;
 }
-.pills { margin-top: 10px; display:flex; gap:8px; flex-wrap: wrap; }
+.pills { margin-top: 10px; display:flex; gap:8px; flex-wrap: wrap; align-items:center; }
 .pill {
   background: rgba(255,255,255,0.06);
   border: 1px solid rgba(255,255,255,0.10);
@@ -64,7 +66,6 @@ h1, h2, h3, p, div, span { font-family: ui-sans-serif, system-ui, -apple-system,
   font-size: 0.85rem;
 }
 .brand {
-  margin-left:auto;
   background: rgba(0,255,0,0.12);
   border: 1px solid rgba(0,255,0,0.22);
   color: #d7ffd7;
@@ -366,7 +367,7 @@ def limit_to_top_leagues(fixtures: List[Dict], max_leagues: int) -> List[Dict]:
 
 
 # =============================
-# Picks builder (ONE market per run)
+# Picks builder (ONE market) + Progress callbacks
 # =============================
 def build_picks_for_market(
     fixtures: List[Dict],
@@ -378,11 +379,22 @@ def build_picks_for_market(
     zebra_min_odd: float,
     max_picks: int,
     bookmaker: int,
+    progress_cb=None,
+    progress_text_cb=None,
 ) -> List[Dict]:
     picks: List[Dict] = []
     used_leagues = set()
 
+    total = max(1, len(fixtures))
+    processed = 0
+
     for fx in fixtures:
+        processed += 1
+        if progress_cb:
+            progress_cb(processed / total)
+        if progress_text_cb:
+            progress_text_cb(f"A analisar {processed}/{total} jogos...")
+
         try:
             fixture_id = int(fx["fixture"]["id"])
             league_id = int(fx["league"]["id"])
@@ -394,7 +406,6 @@ def build_picks_for_market(
             if one_per_league and league_id in used_leagues:
                 continue
 
-            # forma + lambdas
             home_last = get_last_team_fixtures(home_id, last=last_n_form, status="FT")
             away_last = get_last_team_fixtures(away_id, last=last_n_form, status="FT")
             home_form = compute_team_form(home_id, home_last)
@@ -526,11 +537,15 @@ def build_picks_for_market(
         except Exception:
             continue
 
+    if progress_cb:
+        progress_cb(1.0)
+    if progress_text_cb:
+        progress_text_cb("Concluído.")
+
     picks = sorted(
         picks,
         key=lambda x: (-999 if x.get("edge") is None else -x["edge"], -x.get("prob", 0.0)),
     )[:max_picks]
-
     return picks
 
 
@@ -567,25 +582,22 @@ def render_picks(picks: List[Dict]):
 # MAIN
 # =============================
 def main():
-    # Relógio contínuo
+    # Continuous seconds counter
     if HAS_AUTOREFRESH:
         st_autorefresh(interval=1000, key="clock")  # 1s
     else:
-        # fallback: força rerun ao carregar (menos suave)
+        # fallback: not truly continuous, but avoids blocking
         time.sleep(0.01)
 
     now_local = datetime.now(LOCAL_TZ)
 
-    # HERO HEADER
     whatsapp_number = "258867926665"
     whatsapp_link = f"https://wa.me/{whatsapp_number}"
 
     st.markdown(
         f"""
 <div class="hero">
-  <div style="display:flex; align-items:center; gap:10px;">
-    <p class="hero-title">Melhores Palpites e Possível Zebras do Dia.</p>
-  </div>
+  <p class="hero-title">Melhores Palpites e Possível Zebras do Dia.</p>
   <div class="hero-sub">
     <b>Local:</b> Inhassoro &nbsp; | &nbsp; <b>Hora:</b> {now_local.strftime('%H:%M:%S')}
   </div>
@@ -612,12 +624,14 @@ def main():
         min_odd = st.number_input("Odd mínima (normais)", value=1.30, min_value=1.01, step=0.01)
         zebra_min_odd = st.number_input("Odd mínima (zebras)", value=4.00, min_value=2.00, step=0.10)
 
-    # Fixtures hoje (futuros)
+        st.caption("Para relógio contínuo no Streamlit Cloud: adicione 'streamlit-autorefresh' ao requirements.txt.")
+
+    # Fixtures: today future
     date_to_use = now_local.date()
     fixtures = get_fixtures_by_date(date_to_use.strftime("%Y-%m-%d"))
     fixtures = [fx for fx in fixtures if is_future_fixture(fx, now_local)]
 
-    # Amanhã se vazio
+    # tomorrow if empty
     if not fixtures and auto_tomorrow_if_empty:
         date_to_use = (now_local + timedelta(days=1)).date()
         fixtures = get_fixtures_by_date(date_to_use.strftime("%Y-%m-%d"))
@@ -628,7 +642,6 @@ def main():
         return
 
     fixtures = limit_to_top_leagues(fixtures, max_leagues=max_leagues)
-
     st.caption(f"Data analisada: {date_to_use.strftime('%d/%m/%Y')} | Jogos após limite de ligas: {len(fixtures)}")
 
     tabs = st.tabs(["🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "👥 DC+O1.5", "👥 DC+O2.5", "🟣 Zebras"])
@@ -637,10 +650,22 @@ def main():
     for tab, market in zip(tabs, markets):
         with tab:
             st.subheader(f"Mercado: {market}")
-            col1, col2 = st.columns([1, 2])
 
+            col1, col2 = st.columns([1, 2])
             with col1:
                 if st.button(f"Gerar Top {max_picks}", key=f"btn_{market}"):
+                    progress_placeholder = st.empty()
+                    text_placeholder = st.empty()
+
+                    bar = progress_placeholder.progress(0)
+                    text_placeholder.write("A iniciar...")
+
+                    def _p(v: float):
+                        bar.progress(int(v * 100))
+
+                    def _t(msg: str):
+                        text_placeholder.write(msg)
+
                     picks = build_picks_for_market(
                         fixtures=fixtures,
                         market=market,
@@ -651,8 +676,12 @@ def main():
                         zebra_min_odd=zebra_min_odd,
                         max_picks=max_picks,
                         bookmaker=bookmaker,
+                        progress_cb=_p,
+                        progress_text_cb=_t,
                     )
+
                     st.session_state[f"picks_{market}"] = picks
+                    text_placeholder.write("Concluído.")
 
             with col2:
                 st.write(
