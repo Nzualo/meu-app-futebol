@@ -3,3 +3,4 @@ requests
 pandas
 openai
 pytz
+streamlit-autorefresh
