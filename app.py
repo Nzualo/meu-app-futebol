@@ -24,6 +24,34 @@ st.markdown(
 .muted { color: #aab; font-size: 0.90rem; }
 .badge { background-color: #00ff00; color: black; padding: 4px 10px; border-radius: 14px;
          font-weight: 700; display:inline-block; }
+.topbar {
+  background: linear-gradient(135deg, rgba(0,255,0,0.16), rgba(26,28,36,0.95));
+  border: 1px solid rgba(0,255,0,0.22);
+  border-radius: 14px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+.topbar h2 { margin: 0; color: #eaffea; }
+.topbar p { margin: 6px 0 0 0; color: #cfd8e3; }
+a.whatsapp {
+  display:inline-block; text-decoration:none; font-weight:800;
+  padding: 8px 14px; border-radius: 18px;
+  border: 1px solid rgba(0,255,0,0.35);
+  background: rgba(0,255,0,0.18);
+  color: #eaffea;
+  margin-left: 10px;
+}
+a.whatsapp:hover { background: rgba(0,255,0,0.26); }
+.sig {
+  display:inline-block;
+  padding: 6px 12px;
+  border-radius: 18px;
+  border: 1px solid rgba(0,255,0,0.28);
+  background: rgba(0,255,0,0.12);
+  color: #d9ffd9;
+  font-weight: 800;
+  margin-left: 10px;
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -284,7 +312,20 @@ def build_picks_for_market(
     picks: List[Dict] = []
     used_leagues = set()
 
-    for fx in fixtures:
+    # === PROGRESS BAR (adição mínima, sem mudar lógica) ===
+    show_progress = bool(st.session_state.get("_show_progress", False))
+    pbar = st.progress(0) if show_progress else None
+    ptxt = st.empty() if show_progress else None
+    total = max(1, len(fixtures))
+    # =====================================================
+
+    for idx, fx in enumerate(fixtures, start=1):
+        # === update progress ===
+        if show_progress and pbar is not None and ptxt is not None:
+            pbar.progress(min(100, int(idx * 100 / total)))
+            ptxt.write(f"A processar {idx}/{total} jogos...")
+        # =======================
+
         try:
             fixture_id = int(fx["fixture"]["id"])
             league_id = int(fx["league"]["id"])
@@ -431,7 +472,11 @@ def build_picks_for_market(
         except Exception:
             continue
 
-    # ordena por edge desc (se tiver), depois prob desc
+    # limpar progresso
+    if show_progress and pbar is not None and ptxt is not None:
+        pbar.progress(100)
+        ptxt.write("Concluído.")
+
     picks = sorted(
         picks,
         key=lambda x: (
@@ -476,8 +521,23 @@ def render_picks(picks: List[Dict]):
 def main():
     now_local = datetime.now(LOCAL_TZ)
 
+    # === ADIÇÃO: título + localização exata + assinatura + WhatsApp ===
+    st.markdown(
+        f"""
+<div class="topbar">
+  <h2>Melhores Palpites e Possível Zebras do Dia.</h2>
+  <p>
+    <b>Local:</b> Inhassoro &nbsp; | &nbsp; <b>Hora:</b> {now_local.strftime('%H:%M:%S')}
+    <span class="sig">By Nzualo</span>
+    <a class="whatsapp" href="https://wa.me/258867926665" target="_blank" rel="noopener noreferrer">WhatsApp</a>
+  </p>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+    # ================================================================
+
     st.title("🛡️ Elite Scanner 4.1 — Abas com botão Gerar")
-    st.write(f"📍 Inhassoro/Maputo | 🕒 {now_local.strftime('%H:%M:%S')}")
 
     with st.sidebar:
         st.subheader("Configuração rápida")
@@ -526,18 +586,23 @@ def main():
             col1, col2 = st.columns([1, 2])
             with col1:
                 if st.button(f"🚀 Gerar Top {max_picks}", key=f"btn_{market}"):
-                    picks = build_picks_for_market(
-                        fixtures=fixtures,
-                        market=market,
-                        last_n_form=last_n_form,
-                        home_adv=home_adv,
-                        one_per_league=one_per_league,
-                        min_odd=min_odd,
-                        zebra_min_odd=zebra_min_odd,
-                        max_picks=max_picks,
-                        bookmaker=bookmaker,
-                    )
-                    st.session_state[f"picks_{market}"] = picks
+                    # Ativa progresso só durante esta geração
+                    st.session_state["_show_progress"] = True
+                    try:
+                        picks = build_picks_for_market(
+                            fixtures=fixtures,
+                            market=market,
+                            last_n_form=last_n_form,
+                            home_adv=home_adv,
+                            one_per_league=one_per_league,
+                            min_odd=min_odd,
+                            zebra_min_odd=zebra_min_odd,
+                            max_picks=max_picks,
+                            bookmaker=bookmaker,
+                        )
+                        st.session_state[f"picks_{market}"] = picks
+                    finally:
+                        st.session_state["_show_progress"] = False
 
             with col2:
                 st.write(
