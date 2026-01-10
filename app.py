@@ -84,6 +84,21 @@ st.markdown(
   display:inline-block; padding: 5px 10px; border-radius: 16px;
   background: rgba(255,255,255,0.08); color: #fff; font-weight: 900;
 }
+
+.kpi {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin-top: 8px;
+}
+.kpi b { color:#fff; }
+hr { border-color: rgba(255,255,255,0.08); }
+
+.locked {
+  opacity: 0.55;
+  filter: grayscale(35%);
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -108,6 +123,18 @@ def get_premium_codes() -> List[str]:
     if not raw:
         return []
     return [c.strip() for c in raw.split(",") if c.strip()]
+
+
+# =============================
+# Feature flags (Premium)
+# =============================
+def feature_enabled(name: str) -> bool:
+    """
+    Centraliza o gating de recursos Premium.
+    """
+    if name in ("AI_EXPLAIN", "AI_RISK", "EXPORT_PDF", "EXPORT_WA", "TOP_TIPS_PRO", "MULTIBET", "HISTORY", "FAVORITES", "PERF_BOOST"):
+        return is_premium()
+    return True
 
 
 # =============================
@@ -177,6 +204,10 @@ def premium_activate(code: str) -> bool:
     return False
 
 
+def premium_logout():
+    st.session_state["is_premium"] = False
+
+
 def free_used_today() -> int:
     if is_premium():
         return 0
@@ -219,6 +250,36 @@ def consume_generate_chance() -> None:
 
 
 # =============================
+# Session history / favorites (Premium)
+# =============================
+def _ensure_session_lists():
+    if "history" not in st.session_state:
+        st.session_state["history"] = []  # lista de dicts {ts, tab, picks}
+    if "favorites" not in st.session_state:
+        st.session_state["favorites"] = []  # lista de picks
+
+
+def add_to_history(tab_name: str, picks: List[Dict]):
+    _ensure_session_lists()
+    if not feature_enabled("HISTORY"):
+        return
+    st.session_state["history"].insert(0, {"ts": datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S"), "tab": tab_name, "picks": picks})
+    st.session_state["history"] = st.session_state["history"][:20]
+
+
+def add_to_favorites(pick: Dict):
+    _ensure_session_lists()
+    if not feature_enabled("FAVORITES"):
+        return
+    # evita duplicados por fixture + pick
+    key = f"{pick.get('fixture_id')}|{pick.get('pick')}"
+    existing = {f"{p.get('fixture_id')}|{p.get('pick')}" for p in st.session_state["favorites"]}
+    if key not in existing:
+        st.session_state["favorites"].insert(0, pick)
+        st.session_state["favorites"] = st.session_state["favorites"][:30]
+
+
+# =============================
 # OpenAI
 # =============================
 @st.cache_resource
@@ -253,7 +314,7 @@ def ai_explain_pick_cached(
     edge_txt = "n/a" if edge is None else f"{edge*100:.1f}%"
 
     prompt = f"""
-Você é um analista profissional de apostas esportivas. Explique o pick abaixo de forma curta.
+Explique o pick abaixo de forma curta.
 Regras: 4–7 linhas, simples, sem inventar dados externos, inclua 1 risco, finalize com confiança em % (<=90).
 
 Jogo: {match}
@@ -278,7 +339,6 @@ Modelo: Prob={prob:.3f} | Odd={odd:.2f} | Odd justa={fair:.2f} | Edge={edge_txt}
         return "IA indisponível no momento para este pick."
 
 
-# D1 — IA: quando NÃO apostar (alerta de risco)
 @st.cache_data(ttl=60 * 60 * 24)
 def ai_risk_note_cached(
     league: str,
@@ -298,12 +358,12 @@ def ai_risk_note_cached(
     edge_txt = "n/a" if edge is None else f"{edge*100:.1f}%"
 
     prompt = f"""
-Você é um analista de risco para apostas. Dê um alerta curto sobre quando NÃO apostar neste pick.
+Dê um alerta curto sobre quando NÃO apostar neste pick.
 
 Regras:
-- 3 a 6 linhas, direto e prático.
-- Use APENAS os dados fornecidos (não invente lesões, escalação, notícias).
-- Liste 2 a 4 “red flags”.
+- 3 a 6 linhas.
+- Use APENAS os dados fornecidos.
+- Liste 2 a 4 red flags.
 - Termine com: "Se ainda apostar: stake baixa."
 
 Pick:
@@ -319,7 +379,7 @@ Dados do modelo: Prob={prob:.3f} | Odd={odd:.2f} | Odd justa={fair:.2f} | Edge={
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Responda em português, sem enrolar."},
+                {"role": "system", "content": "Responda em português, direto e prático."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.4,
@@ -330,7 +390,7 @@ Dados do modelo: Prob={prob:.3f} | Odd={odd:.2f} | Odd justa={fair:.2f} | Edge={
 
 
 # =============================
-# D3 — Export Top Tips (PDF + texto WhatsApp)
+# Export Top Tips (PDF + WhatsApp)
 # =============================
 def top_tips_to_pdf_bytes(
     picks: List[Dict],
@@ -904,7 +964,7 @@ def build_picks_for_market(
                 odd_x2 = odds_allsports_market(odds_row, "odd_x2")
                 odd_12 = odds_allsports_market(odds_row, "odd_12")
 
-                for dc_name, p_dc, odd_dc in [("1X", p_1x, odd_1x), ("X2", p_x2, odd_x2), ("12", p_12, odd_12)]:
+                for dc_name, p_dc, odd_dc in [("1X", p_1x, odd_1x), ("X2", p_x2, odd_x2 distributions), ("12", p_12, odd_12)]:
                     if not odd_dc or odd_dc < min_odd:
                         continue
                     p_combo = clamp(p_dc * p_over, 0.0, 1.0)
@@ -948,17 +1008,179 @@ def build_picks_for_market(
         picks,
         key=lambda x: (-999 if x.get("edge") is None else -x["edge"], -x.get("prob", 0.0)),
     )[:max_picks]
-
     return picks
 
 
-def render_picks(picks: List[Dict], ai_enabled: bool, ai_risk_enabled: bool, ai_max: int):
+# =============================
+# TOP TIPS (PRO scoring)
+# =============================
+def build_top_tips(
+    fixtures: List[Dict],
+    last_n_form: int,
+    home_adv: float,
+    min_odd: float,
+    zebra_min_odd: float,
+    top_n: int,
+    tips_min_odd: float,
+    tips_max_odd: float,
+    pro_mode: bool,
+) -> List[Dict]:
+    markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5"]
+
+    pbar = st.progress(0)
+    ptxt = st.empty()
+    all_candidates: List[Dict] = []
+
+    for i, m in enumerate(markets, start=1):
+        pbar.progress(int((i - 1) * 100 / len(markets)))
+        ptxt.markdown(f"<div class='ptext'>A gerar candidatos: {m} ({i}/{len(markets)})...</div>", unsafe_allow_html=True)
+
+        cand = build_picks_for_market(
+            fixtures=fixtures,
+            market=m,
+            last_n_form=last_n_form,
+            home_adv=home_adv,
+            one_per_league=False,
+            min_odd=min_odd,
+            zebra_min_odd=zebra_min_odd,
+            max_picks=60 if pro_mode else 50,
+            progress_cb=None,
+        )
+        all_candidates.extend(cand)
+
+    pbar.progress(100)
+    ptxt.markdown("<div class='ptext'>A filtrar odds e selecionar Top Tips...</div>", unsafe_allow_html=True)
+
+    all_candidates = [
+        p for p in all_candidates
+        if (p.get("odd") is not None) and (tips_min_odd <= float(p["odd"]) <= tips_max_odd)
+    ]
+
+    def ev_w(ev: str) -> float:
+        ev = (ev or "").upper().strip()
+        if ev == "ALTA":
+            return 1.0
+        if ev == "MÉDIA":
+            return 0.6
+        return 0.25
+
+    def score_free(p: Dict) -> float:
+        edge = float(p.get("edge") or 0.0)
+        prob = float(p.get("prob") or 0.0)
+        return (1.8 * edge) + (0.9 * prob) + (0.5 * ev_w(p.get("ev", "BAIXA")))
+
+    def score_pro(p: Dict) -> float:
+        # PRO: penaliza odds altas dentro do intervalo, e premia "evidência"
+        edge = float(p.get("edge") or 0.0)
+        prob = float(p.get("prob") or 0.0)
+        odd = float(p.get("odd") or 0.0)
+        ev = ev_w(p.get("ev", "BAIXA"))
+        # Preferir odds mais baixas (mais seguras) dentro do range
+        odd_penalty = clamp((odd - tips_min_odd) / max(0.01, (tips_max_odd - tips_min_odd)), 0.0, 1.0)
+        return (2.1 * edge) + (1.1 * prob) + (0.8 * ev) - (0.35 * odd_penalty)
+
+    all_candidates = sorted(all_candidates, key=(score_pro if pro_mode else score_free), reverse=True)
+
+    final: List[Dict] = []
+    used_leagues = set()
+    used_fixtures = set()
+    for c in all_candidates:
+        lid = c.get("league_id")
+        fid = c.get("fixture_id")
+        if lid in used_leagues:
+            continue
+        if fid in used_fixtures:
+            continue
+        final.append(c)
+        used_leagues.add(lid)
+        used_fixtures.add(fid)
+        if len(final) >= top_n:
+            break
+
+    ptxt.markdown("<div class='ptext'>Concluído.</div>", unsafe_allow_html=True)
+    return final
+
+
+# =============================
+# Premium: Multi-bet Builder
+# =============================
+def build_multibet(
+    picks: List[Dict],
+    min_legs: int,
+    max_legs: int,
+    target_min_odds: float,
+    target_max_odds: float,
+) -> List[Dict]:
+    """
+    Usa os Top Tips já gerados e propõe combinações 2–4 picks.
+    Regra: não repetir mesma fixture.
+    """
+    if not picks:
+        return []
+
+    # ordena por qualidade (edge, prob)
+    picks_sorted = sorted(picks, key=lambda x: ((x.get("edge") or -999), (x.get("prob") or 0.0)), reverse=True)
+
+    combos = []
+    # geração simples (rápida)
+    for legs in range(min_legs, max_legs + 1):
+        # pega os melhores N e faz combinações lineares (sem explodir)
+        pool = picks_sorted[: min(20, len(picks_sorted))]
+        n = len(pool)
+
+        def ok_unique_fixture(combo):
+            fids = [c.get("fixture_id") for c in combo]
+            return len(fids) == len(set(fids))
+
+        # combinações "greedy": pega base e tenta completar
+        for i in range(n):
+            combo = [pool[i]]
+            for j in range(n):
+                if j == i:
+                    continue
+                if len(combo) >= legs:
+                    break
+                candidate = pool[j]
+                if candidate.get("fixture_id") in {c.get("fixture_id") for c in combo}:
+                    continue
+                combo.append(candidate)
+
+            if len(combo) != legs:
+                continue
+            if not ok_unique_fixture(combo):
+                continue
+
+            total_odds = 1.0
+            avg_prob = 0.0
+            for c in combo:
+                total_odds *= float(c.get("odd") or 1.0)
+                avg_prob += float(c.get("prob") or 0.0)
+            avg_prob /= legs
+
+            if target_min_odds <= total_odds <= target_max_odds:
+                combos.append(
+                    {
+                        "legs": legs,
+                        "total_odds": total_odds,
+                        "avg_prob": avg_prob,
+                        "items": combo,
+                    }
+                )
+
+    combos = sorted(combos, key=lambda x: (x["avg_prob"], -x["total_odds"]), reverse=True)
+    return combos[:10]
+
+
+# =============================
+# Render
+# =============================
+def render_picks(picks: List[Dict], ai_enabled: bool, ai_risk_enabled: bool, ai_max: int, allow_fav: bool):
     if not picks:
         st.info("Sem picks que passem nos filtros (ou odds indisponíveis).")
         return
 
     ai_count = 0
-    for p in picks:
+    for idx, p in enumerate(picks, start=1):
         edge = p.get("edge")
         edge_txt = f"{edge*100:.1f}%" if edge is not None else "n/a"
 
@@ -977,8 +1199,12 @@ def render_picks(picks: List[Dict], ai_enabled: bool, ai_risk_enabled: bool, ai_
             unsafe_allow_html=True,
         )
 
+        if allow_fav:
+            if st.button("⭐ Guardar nos Favoritos", key=f"fav_{p.get('fixture_id')}_{idx}"):
+                add_to_favorites(p)
+                st.success("Guardado.")
+
         if ai_enabled:
-            # Explicação (conta para o limite)
             if ai_count < ai_max:
                 with st.expander("🧠 IA: Por que este pick? (explicação curta)"):
                     with st.spinner("A gerar explicação da IA..."):
@@ -1001,7 +1227,6 @@ def render_picks(picks: List[Dict], ai_enabled: bool, ai_risk_enabled: bool, ai_
             else:
                 st.markdown("<div class='small'>IA: limite de explicações/alertas desta aba atingido.</div>", unsafe_allow_html=True)
 
-            # D1: Alertas de risco (quando NÃO apostar) — também conta no limite
             if ai_risk_enabled:
                 if ai_count < ai_max:
                     with st.expander("🛑 IA: Quando NÃO apostar (alerta de risco)"):
@@ -1027,84 +1252,6 @@ def render_picks(picks: List[Dict], ai_enabled: bool, ai_risk_enabled: bool, ai_
 
 
 # =============================
-# TOP TIPS
-# =============================
-def build_top_tips(
-    fixtures: List[Dict],
-    last_n_form: int,
-    home_adv: float,
-    min_odd: float,
-    zebra_min_odd: float,
-    top_n: int,
-    tips_min_odd: float,
-    tips_max_odd: float,
-) -> List[Dict]:
-    markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5"]
-
-    pbar = st.progress(0)
-    ptxt = st.empty()
-    all_candidates: List[Dict] = []
-
-    for i, m in enumerate(markets, start=1):
-        pbar.progress(int((i - 1) * 100 / len(markets)))
-        ptxt.markdown(f"<div class='ptext'>A gerar candidatos: {m} ({i}/{len(markets)})...</div>", unsafe_allow_html=True)
-        cand = build_picks_for_market(
-            fixtures=fixtures,
-            market=m,
-            last_n_form=last_n_form,
-            home_adv=home_adv,
-            one_per_league=False,
-            min_odd=min_odd,
-            zebra_min_odd=zebra_min_odd,
-            max_picks=50,
-            progress_cb=None,
-        )
-        all_candidates.extend(cand)
-
-    pbar.progress(100)
-    ptxt.markdown("<div class='ptext'>A filtrar odds e selecionar Top Tips...</div>", unsafe_allow_html=True)
-
-    all_candidates = [
-        p for p in all_candidates
-        if (p.get("odd") is not None) and (tips_min_odd <= float(p["odd"]) <= tips_max_odd)
-    ]
-
-    def ev_w(ev: str) -> float:
-        ev = (ev or "").upper().strip()
-        if ev == "ALTA":
-            return 1.0
-        if ev == "MÉDIA":
-            return 0.6
-        return 0.25
-
-    def score(p: Dict) -> float:
-        edge = float(p.get("edge") or 0.0)
-        prob = float(p.get("prob") or 0.0)
-        return (1.8 * edge) + (0.9 * prob) + (0.5 * ev_w(p.get("ev", "BAIXA")))
-
-    all_candidates = sorted(all_candidates, key=score, reverse=True)
-
-    final: List[Dict] = []
-    used_leagues = set()
-    used_fixtures = set()
-    for c in all_candidates:
-        lid = c.get("league_id")
-        fid = c.get("fixture_id")
-        if lid in used_leagues:
-            continue
-        if fid in used_fixtures:
-            continue
-        final.append(c)
-        used_leagues.add(lid)
-        used_fixtures.add(fid)
-        if len(final) >= top_n:
-            break
-
-    ptxt.markdown("<div class='ptext'>Concluído.</div>", unsafe_allow_html=True)
-    return final
-
-
-# =============================
 # MAIN
 # =============================
 def main():
@@ -1114,6 +1261,8 @@ def main():
         st.session_state["is_premium"] = False
     if "_sid_fallback" not in st.session_state:
         st.session_state["_sid_fallback"] = hashlib.md5(str(datetime.utcnow().timestamp()).encode()).hexdigest()[:10]
+
+    _ensure_session_lists()
 
     st.markdown(
         f"""
@@ -1141,11 +1290,15 @@ def main():
         unsafe_allow_html=True,
     )
 
+    # ---------------- Sidebar
     with st.sidebar:
         st.subheader("Acesso")
 
         if is_premium():
             st.markdown("<span class='premium-pill'>Modo: PREMIUM</span>", unsafe_allow_html=True)
+            if st.button("Sair do Premium"):
+                premium_logout()
+                st.success("Premium desativado nesta sessão.")
         else:
             st.markdown("<span class='free-pill'>Modo: FREE</span>", unsafe_allow_html=True)
 
@@ -1166,6 +1319,8 @@ def main():
             rem = free_remaining_today()
             st.warning(f"FREE: {rem} de {FREE_MAX_GENERATES_PER_DAY} gerações restantes hoje.")
             st.caption("Ao virar o dia (hora de Moçambique), renova automaticamente.")
+        else:
+            st.success("Premium: gerações ilimitadas + recursos PRO.")
 
         st.subheader("Configuração")
         auto_tomorrow_if_empty = st.checkbox("Se hoje não tiver jogos futuros, usar amanhã", value=True)
@@ -1186,20 +1341,28 @@ def main():
         zebra_min_odd = st.number_input("Odd mínima (zebras)", value=4.00, min_value=2.00, step=0.10)
 
         st.divider()
-        st.subheader("IA")
-        ai_enabled = st.checkbox("Ativar IA para explicar picks", value=True)
+        st.subheader("Recursos Premium")
 
-        if not is_premium() and ai_enabled:
-            ai_enabled = False
-            st.info("IA é recurso Premium.")
+        # Top Tips PRO
+        pro_tips = st.checkbox("⭐ Top Tips PRO (ranking melhor)", value=True, disabled=not is_premium())
+        if not is_premium():
+            st.caption("Top Tips PRO: apenas Premium.")
 
-        # D1 toggle (somente Premium)
-        ai_risk_enabled = st.checkbox("IA: Alertas de risco (quando NÃO apostar)", value=True)
-        if not is_premium() and ai_risk_enabled:
-            ai_risk_enabled = False
-            st.info("Alertas de risco (IA) é recurso Premium.")
+        # Multi-bet
+        multibet_on = st.checkbox("🎯 Multi-bet Builder (2–4 legs)", value=True, disabled=not is_premium())
+        if not is_premium():
+            st.caption("Multi-bet: apenas Premium.")
 
-        ai_max = st.slider("Máx. explicações/alertas por aba", 1, 12, 6, 1)
+        st.divider()
+        st.subheader("IA (Premium)")
+        ai_enabled = st.checkbox("Ativar IA para explicar picks", value=True, disabled=not is_premium())
+        ai_risk_enabled = st.checkbox("IA: Alertas de risco (quando NÃO apostar)", value=True, disabled=not is_premium())
+
+        # Boost de performance Premium (mais IA por aba)
+        if is_premium():
+            ai_max = st.slider("Máx. explicações/alertas por aba", 2, 16, 8, 1)
+        else:
+            ai_max = 0
 
         ai_ok = True
         if (ai_enabled or ai_risk_enabled) and not st.secrets.get("OPENAI_API_KEY"):
@@ -1208,7 +1371,13 @@ def main():
 
         debug = st.checkbox("Mostrar diagnóstico (debug)", value=False)
 
-    # Fixtures
+        st.markdown("---")
+        if is_premium():
+            st.markdown("<div class='kpi'><b>Premium ativo</b><br/>Top Tips PRO • IA • Export • Multi-bet • Histórico/Favoritos</div>", unsafe_allow_html=True)
+        else:
+            st.markdown("<div class='kpi'><b>FREE</b><br/>3 gerações/dia • Sem IA • Sem export • Sem Multi-bet</div>", unsafe_allow_html=True)
+
+    # ---------------- Fixtures
     date_to_use = now_local.date()
     date_str = date_to_use.strftime("%Y-%m-%d")
     fixtures_raw = get_fixtures_by_date(date_str)
@@ -1239,9 +1408,9 @@ def main():
     st.markdown(f"🗓️ Data analisada: <span class='badge'>{date_to_use.strftime('%d/%m/%Y')}</span>", unsafe_allow_html=True)
     st.caption(f"Pool final: {len(fixtures)} jogos | Máx. ligas: {max_leagues}")
 
-    tabs = st.tabs(["⭐ Top Tips", "🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "👥 DC+O1.5", "👥 DC+O2.5", "🟣 Zebras"])
+    tabs = st.tabs(["⭐ Top Tips", "🎯 Multi-bet", "📌 Favoritos", "🕘 Histórico", "🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "👥 DC+O1.5", "👥 DC+O2.5", "🟣 Zebras"])
 
-    # Top Tips
+    # ---------------- Top Tips
     with tabs[0]:
         st.subheader("⭐ Top Tips do Dia (odds moderadas)")
         st.caption(f"Filtro: odds entre {tips_min_odd:.2f} e {tips_max_odd:.2f}")
@@ -1258,41 +1427,109 @@ def main():
                 top_n=top_tips_n,
                 tips_min_odd=float(tips_min_odd),
                 tips_max_odd=float(tips_max_odd),
+                pro_mode=(is_premium() and pro_tips),
             )
             st.session_state["toptips"] = tips
+            add_to_history("Top Tips", tips)
 
         if disabled and not is_premium():
             st.warning("Limite FREE diário atingido (3 gerações hoje). Ative Premium para ilimitado.")
 
         tips_list = st.session_state.get("toptips", [])
 
-        # D3: Exportar Top Tips (PDF + texto WhatsApp)
+        # Export (Premium)
         if tips_list:
             st.markdown("### 📤 Exportar Top Tips")
-            colA, colB = st.columns([1, 1])
+            if not is_premium():
+                st.info("Export é recurso Premium.")
+            else:
+                colA, colB = st.columns([1, 1])
+                with colA:
+                    pdf_bytes = top_tips_to_pdf_bytes(
+                        picks=tips_list,
+                        date_str=date_to_use.strftime("%d/%m/%Y"),
+                        location="Inhassoro",
+                        author="By Nzualo",
+                    )
+                    st.download_button(
+                        label="📄 Baixar Top Tips em PDF",
+                        data=pdf_bytes,
+                        file_name=f"top_tips_{date_to_use.strftime('%Y-%m-%d')}.pdf",
+                        mime="application/pdf",
+                    )
+                with colB:
+                    wa_text = top_tips_whatsapp_text(tips_list, date_to_use.strftime("%d/%m/%Y"))
+                    st.text_area("Texto pronto para WhatsApp (copiar e colar)", value=wa_text, height=190)
 
-            with colA:
-                pdf_bytes = top_tips_to_pdf_bytes(
-                    picks=tips_list,
-                    date_str=date_to_use.strftime("%d/%m/%Y"),
-                    location="Inhassoro",
-                    author="By Nzualo",
-                )
-                st.download_button(
-                    label="📄 Baixar Top Tips em PDF",
-                    data=pdf_bytes,
-                    file_name=f"top_tips_{date_to_use.strftime('%Y-%m-%d')}.pdf",
-                    mime="application/pdf",
-                )
+        render_picks(
+            tips_list,
+            ai_enabled=(is_premium() and ai_ok and ai_enabled),
+            ai_risk_enabled=(is_premium() and ai_ok and ai_risk_enabled),
+            ai_max=ai_max,
+            allow_fav=is_premium(),
+        )
 
-            with colB:
-                wa_text = top_tips_whatsapp_text(tips_list, date_to_use.strftime("%d/%m/%Y"))
-                st.text_area("Texto pronto para WhatsApp (copiar e colar)", value=wa_text, height=190)
+    # ---------------- Multi-bet (Premium)
+    with tabs[1]:
+        st.subheader("🎯 Multi-bet Builder (Premium)")
+        if not is_premium():
+            st.info("Este recurso é Premium. Ative Premium para ver combinações 2–4 picks.")
+        else:
+            tips_list = st.session_state.get("toptips", [])
+            if not tips_list:
+                st.warning("Primeiro gere os ⭐ Top Tips, depois volte aqui.")
+            else:
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    min_legs = st.slider("Mín legs", 2, 4, 2, 1)
+                with col2:
+                    max_legs = st.slider("Máx legs", 2, 4, 3, 1)
+                with col3:
+                    target_min = st.number_input("Odd total mínima", value=2.20, min_value=1.10, step=0.10)
+                    target_max = st.number_input("Odd total máxima", value=6.00, min_value=1.20, step=0.10)
 
-        render_picks(tips_list, ai_enabled=(ai_enabled and ai_ok), ai_risk_enabled=(ai_risk_enabled and ai_ok), ai_max=ai_max)
+                if st.button("Gerar Multi-bets"):
+                    combos = build_multibet(tips_list, min_legs, max_legs, target_min, target_max)
+                    st.session_state["multibets"] = combos
 
+                combos = st.session_state.get("multibets", [])
+                if not combos:
+                    st.caption("Sem combinações ainda. Clique em 'Gerar Multi-bets'.")
+                else:
+                    for k, c in enumerate(combos, start=1):
+                        st.markdown(f"**Combo {k}** — Legs: {c['legs']} | Odd total: **{c['total_odds']:.2f}** | Prob média: **{c['avg_prob']:.3f}**")
+                        for it in c["items"]:
+                            st.write(f"- {it['time']} | {it['league']} | {it['match']} | {it['pick']} @ {float(it['odd']):.2f}")
+
+    # ---------------- Favoritos (Premium)
+    with tabs[2]:
+        st.subheader("📌 Favoritos (Premium)")
+        if not is_premium():
+            st.info("Favoritos é recurso Premium.")
+        else:
+            favs = st.session_state.get("favorites", [])
+            if not favs:
+                st.caption("Nenhum favorito ainda. Abra um pick e clique em ⭐ Guardar.")
+            else:
+                render_picks(favs, ai_enabled=False, ai_risk_enabled=False, ai_max=0, allow_fav=False)
+
+    # ---------------- Histórico (Premium)
+    with tabs[3]:
+        st.subheader("🕘 Histórico (Premium)")
+        if not is_premium():
+            st.info("Histórico é recurso Premium.")
+        else:
+            hist = st.session_state.get("history", [])
+            if not hist:
+                st.caption("Sem histórico ainda. Gere Top Tips ou mercados para registrar.")
+            else:
+                for h in hist:
+                    with st.expander(f"{h['ts']} — {h['tab']} ({len(h['picks'])} picks)"):
+                        render_picks(h["picks"], ai_enabled=False, ai_risk_enabled=False, ai_max=0, allow_fav=False)
+
+    # ---------------- Markets
     markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5", "Zebras"]
-    for tab, market in zip(tabs[1:], markets):
+    for tab, market in zip(tabs[4:], markets):
         with tab:
             st.subheader(f"Mercado: {market}")
             col1, col2 = st.columns([1, 2])
@@ -1322,6 +1559,8 @@ def main():
                         progress_cb=cb,
                     )
                     st.session_state[f"picks_{market}"] = picks
+                    add_to_history(market, picks)
+
                     pbar.progress(100)
                     ptxt.markdown("<div class='ptext'>Concluído.</div>", unsafe_allow_html=True)
 
@@ -1330,15 +1569,16 @@ def main():
 
             with col2:
                 if is_premium():
-                    st.write("Premium: gerações ilimitadas, IA disponível (se habilitada).")
+                    st.write("Premium: gerações ilimitadas + IA + export + multi-bet + histórico.")
                 else:
                     st.write(f"Free: restantes hoje: {free_remaining_today()}/{FREE_MAX_GENERATES_PER_DAY}.")
 
             render_picks(
                 st.session_state.get(f"picks_{market}", []),
-                ai_enabled=(ai_enabled and ai_ok),
-                ai_risk_enabled=(ai_risk_enabled and ai_ok),
-                ai_max=ai_max
+                ai_enabled=(is_premium() and ai_ok and ai_enabled),
+                ai_risk_enabled=(is_premium() and ai_ok and ai_risk_enabled),
+                ai_max=ai_max,
+                allow_fav=is_premium(),
             )
 
 
