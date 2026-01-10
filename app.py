@@ -1,3 +1,15 @@
+# COLE ESTE CÓDIGO INTEIRO NO SEU app.py PARA TESTAR ODDS (DEBUG)
+# Ele inclui:
+# - Seu design (título, assinatura, WhatsApp, relógio com segundos)
+# - Abas com botão "Gerar Top N"
+# - Barra de progresso ao gerar
+# - DEBUG: botão "TESTAR ODDS AGORA" que mostra o JSON real do /odds
+#
+# Requisitos:
+# secrets.toml:
+# FOOTBALL_API_KEY="..."
+# FOOTBALL_API_MODE="apisports"  # ou "rapidapi"
+# (opcional) FOOTBALL_RAPIDAPI_HOST="v3.football.api-sports.io"
 
 import math
 import time
@@ -327,7 +339,7 @@ def estimate_lambdas(home_form, away_form, home_adv: float = 1.08) -> Tuple[floa
 
 
 # =============================
-# Odds parsing
+# Odds parsing + DEBUG helpers
 # =============================
 def _extract_market_odds(odds_response: List[Dict], market_keywords: List[str], selection_keywords: List[str]) -> Optional[float]:
     try:
@@ -350,6 +362,26 @@ def _extract_market_odds(odds_response: List[Dict], market_keywords: List[str], 
         return None
 
 
+def summarize_odds_names(odds_response: List[Dict]) -> Dict:
+    """Lista nomes de bookmakers, mercados (bets) e algumas selections (values) para ajustar keywords."""
+    out = {"bookmakers": []}
+    if not odds_response:
+        return out
+    try:
+        item = odds_response[0]
+        for bk in item.get("bookmakers", []):
+            bk_name = bk.get("name")
+            markets = []
+            for bet in bk.get("bets", []):
+                bet_name = bet.get("name")
+                vals = [v.get("value") for v in bet.get("values", [])][:6]
+                markets.append({"bet_name": bet_name, "values_sample": vals})
+            out["bookmakers"].append({"name": bk_name, "markets": markets[:25]})
+        return out
+    except Exception:
+        return out
+
+
 # =============================
 # Limit to top leagues
 # =============================
@@ -367,7 +399,7 @@ def limit_to_top_leagues(fixtures: List[Dict], max_leagues: int) -> List[Dict]:
 
 
 # =============================
-# Picks builder (ONE market) + Progress callbacks
+# Picks builder + Progress callbacks
 # =============================
 def build_picks_for_market(
     fixtures: List[Dict],
@@ -497,7 +529,7 @@ def build_picks_for_market(
                 odd_x2 = _extract_market_odds(odds_resp, ["double chance"], ["draw/away"]) or _extract_market_odds(odds_resp, ["double chance"], ["x2"])
                 odd_12 = _extract_market_odds(odds_resp, ["double chance"], ["home/away"]) or _extract_market_odds(odds_resp, ["double chance"], ["12"])
 
-                for dc_name, p_dc, odd_dc in [("1X", p_1x, odd_1x), ("X2", p_x2, odd_x2), ("12", p_12, odd_12)]:
+                for dc_name, p_dc, odd_dc in [("1X", pH + pD, odd_1x), ("X2", pA + pD, odd_x2), ("12", pH + pA, odd_12)]:
                     if not odd_dc or odd_dc < min_odd:
                         continue
                     p_combo = clamp(p_dc * p_over, 0.0, 1.0)
@@ -553,7 +585,6 @@ def render_picks(picks: List[Dict]):
     if not picks:
         st.info("Sem picks que passem nos filtros (ou odds indisponíveis).")
         return
-
     for p in picks:
         edge = p.get("edge")
         edge_txt = f"{edge*100:.1f}%" if edge is not None else "n/a"
@@ -571,7 +602,6 @@ def render_picks(picks: List[Dict]):
     <span>Evid.: <b>{p['ev']}</b></span>
     <span>λ: <b>{p['lam'][0]:.2f}-{p['lam'][1]:.2f}</b></span>
   </div>
-  <div class="muted" style="margin-top:8px;">DC+Over usa odd proxy quando o feed não traz odd combinada.</div>
 </div>
 """,
             unsafe_allow_html=True,
@@ -582,11 +612,10 @@ def render_picks(picks: List[Dict]):
 # MAIN
 # =============================
 def main():
-    # Continuous seconds counter
+    # clock refresh
     if HAS_AUTOREFRESH:
-        st_autorefresh(interval=1000, key="clock")  # 1s
+        st_autorefresh(interval=1000, key="clock")
     else:
-        # fallback: not truly continuous, but avoids blocking
         time.sleep(0.01)
 
     now_local = datetime.now(LOCAL_TZ)
@@ -598,9 +627,7 @@ def main():
         f"""
 <div class="hero">
   <p class="hero-title">Melhores Palpites e Possível Zebras do Dia.</p>
-  <div class="hero-sub">
-    <b>Local:</b> Inhassoro &nbsp; | &nbsp; <b>Hora:</b> {now_local.strftime('%H:%M:%S')}
-  </div>
+  <div class="hero-sub"><b>Local:</b> Inhassoro &nbsp; | &nbsp; <b>Hora:</b> {now_local.strftime('%H:%M:%S')}</div>
   <div class="pills">
     <span class="pill brand">By Nzualo</span>
     <a class="whatsapp" href="{whatsapp_link}" target="_blank" rel="noopener noreferrer">WhatsApp</a>
@@ -624,9 +651,7 @@ def main():
         min_odd = st.number_input("Odd mínima (normais)", value=1.30, min_value=1.01, step=0.01)
         zebra_min_odd = st.number_input("Odd mínima (zebras)", value=4.00, min_value=2.00, step=0.10)
 
-        st.caption("Para relógio contínuo no Streamlit Cloud: adicione 'streamlit-autorefresh' ao requirements.txt.")
-
-    # Fixtures: today future
+    # fixtures today
     date_to_use = now_local.date()
     fixtures = get_fixtures_by_date(date_to_use.strftime("%Y-%m-%d"))
     fixtures = [fx for fx in fixtures if is_future_fixture(fx, now_local)]
@@ -644,6 +669,34 @@ def main():
     fixtures = limit_to_top_leagues(fixtures, max_leagues=max_leagues)
     st.caption(f"Data analisada: {date_to_use.strftime('%d/%m/%Y')} | Jogos após limite de ligas: {len(fixtures)}")
 
+    # =============================
+    # DEBUG ODDS SECTION (THIS IS WHAT YOU WANTED)
+    # =============================
+    with st.expander("🛠️ Debug: TESTAR ODDS (clique aqui)", expanded=False):
+        st.write("Isto mostra o JSON real que a sua conta está a receber no endpoint /odds.")
+        if st.button("TESTAR ODDS AGORA"):
+            fx0 = fixtures[0]
+            fid = int(fx0["fixture"]["id"])
+            st.write("Fixture ID:", fid)
+            resp = get_odds_for_fixture(fid, bookmaker=bookmaker)
+            st.write("Resposta bruta (/odds -> response[0]):")
+            st.json(resp[:1] if isinstance(resp, list) else resp)
+
+            st.write("Resumo (nomes de mercados e selections):")
+            st.json(summarize_odds_names(resp))
+
+            st.write("Teste rápido de extração (1X2 / BTTS / Over):")
+            st.json({
+                "1X2 Home": _extract_market_odds(resp, ["match winner"], ["home"]),
+                "1X2 Draw": _extract_market_odds(resp, ["match winner"], ["draw"]),
+                "1X2 Away": _extract_market_odds(resp, ["match winner"], ["away"]),
+                "BTTS Yes": _extract_market_odds(resp, ["both teams score"], ["yes"]),
+                "Over 1.5": _extract_market_odds(resp, ["goals over/under"], ["over 1.5"]),
+                "Over 2.5": _extract_market_odds(resp, ["goals over/under"], ["over 2.5"]),
+                "DC 1X": _extract_market_odds(resp, ["double chance"], ["home/draw"]) or _extract_market_odds(resp, ["double chance"], ["1x"]),
+            })
+
+    # tabs
     tabs = st.tabs(["🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "👥 DC+O1.5", "👥 DC+O2.5", "🟣 Zebras"])
     markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5", "Zebras"]
 
@@ -656,7 +709,6 @@ def main():
                 if st.button(f"Gerar Top {max_picks}", key=f"btn_{market}"):
                     progress_placeholder = st.empty()
                     text_placeholder = st.empty()
-
                     bar = progress_placeholder.progress(0)
                     text_placeholder.write("A iniciar...")
 
@@ -679,7 +731,6 @@ def main():
                         progress_cb=_p,
                         progress_text_cb=_t,
                     )
-
                     st.session_state[f"picks_{market}"] = picks
                     text_placeholder.write("Concluído.")
 
