@@ -1,9 +1,3 @@
-# app.py — versão completa para você colar
-# Corrige o "pisca" do Debug/TESTAR ODDS com autorefresh:
-# - pausa o autorefresh enquanto testa odds (e mantém resultado em session_state)
-# - inclui botão "RETOMAR RELÓGIO"
-# - mantém design, WhatsApp, assinatura, abas, botão Gerar com barra de progresso
-
 import math
 import time
 from datetime import datetime, timedelta
@@ -23,26 +17,27 @@ except Exception:
     HAS_AUTOREFRESH = False
 
 # =============================
-# SESSION STATE (anti-piscar)
+# OPENAI (IA)
+# =============================
+IA_ENABLED_DEFAULT = True
+try:
+    from openai import OpenAI
+    HAS_OPENAI = True
+except Exception:
+    HAS_OPENAI = False
+
+# =============================
+# SESSION STATE
 # =============================
 if "pause_refresh" not in st.session_state:
     st.session_state["pause_refresh"] = False
-
-if "debug_odds_raw" not in st.session_state:
-    st.session_state["debug_odds_raw"] = None
-
-if "debug_odds_summary" not in st.session_state:
-    st.session_state["debug_odds_summary"] = None
-
-if "debug_extract_test" not in st.session_state:
-    st.session_state["debug_extract_test"] = None
 
 # =============================
 # CONFIG
 # =============================
 LOCAL_TZ = pytz.timezone("Africa/Maputo")
 API_BASE = "https://v3.football.api-sports.io"
-MAX_LEAGUES_DEFAULT = 20
+MAX_LEAGUES_DEFAULT = int(st.secrets.get("FOOTBALL_MAX_LEAGUES", 20))
 
 st.set_page_config(page_title="Melhores Palpites do Dia", layout="wide")
 
@@ -54,101 +49,46 @@ st.markdown(
 <style>
 .main { background-color: #0b0f17; }
 .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
-h1, h2, h3, p, div, span { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
-
-/* Header */
 .hero {
-  border-radius: 16px;
-  padding: 18px 18px;
+  border-radius: 16px; padding: 18px 18px;
   background: linear-gradient(135deg, rgba(0,255,0,0.14), rgba(15,22,35,0.95));
   border: 1px solid rgba(0,255,0,0.22);
   box-shadow: 0 10px 30px rgba(0,0,0,0.30);
   margin-bottom: 16px;
 }
-.hero-title {
-  font-size: 1.35rem;
-  font-weight: 800;
-  color: #eaffea;
-  margin: 0;
-}
-.hero-sub {
-  margin-top: 8px;
-  color: #cdd6e0;
-  font-size: 0.95rem;
-}
+.hero-title { font-size: 1.35rem; font-weight: 800; color: #eaffea; margin: 0; }
+.hero-sub { margin-top: 8px; color: #cdd6e0; font-size: 0.95rem; }
 .pills { margin-top: 10px; display:flex; gap:8px; flex-wrap: wrap; align-items:center; }
 .pill {
-  background: rgba(255,255,255,0.06);
-  border: 1px solid rgba(255,255,255,0.10);
-  color: #e9eef7;
-  border-radius: 999px;
-  padding: 6px 10px;
-  font-size: 0.85rem;
+  background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.10);
+  color: #e9eef7; border-radius: 999px; padding: 6px 10px; font-size: 0.85rem;
 }
-.brand {
-  background: rgba(0,255,0,0.12);
-  border: 1px solid rgba(0,255,0,0.22);
-  color: #d7ffd7;
-}
+.brand { background: rgba(0,255,0,0.12); border: 1px solid rgba(0,255,0,0.22); color: #d7ffd7; }
 
-/* Cards */
 .card {
-  background-color: #141a27;
-  padding: 14px;
-  border-radius: 14px;
+  background-color: #141a27; padding: 14px; border-radius: 14px;
   border: 1px solid rgba(255,255,255,0.08);
   box-shadow: 0 8px 22px rgba(0,0,0,0.28);
   margin-bottom: 10px;
 }
-.card-left {
-  border-left: 6px solid #00ff00;
-}
-.meta {
-  color: #aab6c5;
-  font-size: 0.88rem;
-}
-.pickline {
-  margin-top: 8px;
-  font-size: 1.02rem;
-}
-.kpi {
-  display:flex;
-  gap:10px;
-  flex-wrap: wrap;
-  margin-top: 10px;
-}
+.card-left { border-left: 6px solid #00ff00; }
+.meta { color: #aab6c5; font-size: 0.88rem; }
+.pickline { margin-top: 8px; font-size: 1.02rem; }
+.kpi { display:flex; gap:10px; flex-wrap: wrap; margin-top: 10px; }
 .kpi span {
-  background: rgba(255,255,255,0.05);
-  border: 1px solid rgba(255,255,255,0.08);
-  padding: 6px 10px;
-  border-radius: 10px;
-  font-size: 0.88rem;
-  color: #e8eef7;
+  background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
+  padding: 6px 10px; border-radius: 10px; font-size: 0.88rem; color: #e8eef7;
 }
 
-/* WhatsApp button */
 a.whatsapp {
-  display:inline-block;
-  text-decoration:none;
-  font-weight: 800;
-  padding: 10px 14px;
-  border-radius: 12px;
-  border: 1px solid rgba(0,255,0,0.35);
-  background: rgba(0,255,0,0.16);
-  color: #eaffea;
+  display:inline-block; text-decoration:none; font-weight: 800; padding: 10px 14px;
+  border-radius: 12px; border: 1px solid rgba(0,255,0,0.35);
+  background: rgba(0,255,0,0.16); color: #eaffea;
 }
 a.whatsapp:hover { background: rgba(0,255,0,0.24); }
 
-/* Tabs spacing */
 div[data-baseweb="tab-list"] { gap: 6px; }
-
-/* Debug box (visual) */
-.debugbox {
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.10);
-  border-radius: 12px;
-  padding: 10px;
-}
+.smallnote { color:#aab6c5; font-size: 0.85rem; margin-top: 8px; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -163,8 +103,8 @@ def _get_secret(name: str, default: Optional[str] = None) -> str:
         raise RuntimeError(f"Missing secret: {name}")
     return str(v)
 
-
 def _football_headers() -> Dict[str, str]:
+    # API-SPORTS (api-football.com): header x-apisports-key
     api_key = _get_secret("FOOTBALL_API_KEY")
     mode = st.secrets.get("FOOTBALL_API_MODE", "apisports").lower().strip()
     if mode == "rapidapi":
@@ -172,8 +112,7 @@ def _football_headers() -> Dict[str, str]:
         return {"x-rapidapi-key": api_key, "x-rapidapi-host": host}
     return {"x-apisports-key": api_key}
 
-
-def api_get(path: str, params: Dict[str, str], timeout: int = 12) -> Dict:
+def api_get(path: str, params: Dict[str, str], timeout: int = 15) -> Dict:
     try:
         r = requests.get(f"{API_BASE}{path}", headers=_football_headers(), params=params, timeout=timeout)
         r.raise_for_status()
@@ -181,24 +120,23 @@ def api_get(path: str, params: Dict[str, str], timeout: int = 12) -> Dict:
     except Exception as e:
         return {"response": [], "errors": {"request": str(e)}}
 
-
 @st.cache_data(ttl=60 * 10)
 def get_fixtures_by_date(date_yyyy_mm_dd: str) -> List[Dict]:
     data = api_get("/fixtures", {"date": date_yyyy_mm_dd})
     return data.get("response", []) or []
 
-
-@st.cache_data(ttl=60 * 60 * 2)
+@st.cache_data(ttl=60 * 60)
 def get_last_team_fixtures(team_id: int, last: int = 10, status: str = "FT") -> List[Dict]:
     data = api_get("/fixtures", {"team": str(team_id), "last": str(last), "status": status})
     return data.get("response", []) or []
 
-
 @st.cache_data(ttl=60 * 10)
-def get_odds_for_fixture(fixture_id: int, bookmaker: int = 8) -> List[Dict]:
-    data = api_get("/odds", {"fixture": str(fixture_id), "bookmaker": str(bookmaker)})
+def get_odds_for_fixture(fixture_id: int, bookmaker: Optional[int] = None) -> List[Dict]:
+    params = {"fixture": str(fixture_id)}
+    if bookmaker is not None:
+        params["bookmaker"] = str(bookmaker)
+    data = api_get("/odds", params)
     return data.get("response", []) or []
-
 
 # =============================
 # Time parsing
@@ -211,20 +149,17 @@ def parse_fixture_time_local(fx: Dict) -> Optional[datetime]:
     except Exception:
         return None
 
-
 def is_future_fixture(fx: Dict, now_local: datetime) -> bool:
     dt = parse_fixture_time_local(fx)
     return bool(dt and dt > now_local)
 
-
 # =============================
-# Poisson Model
+# Poisson model
 # =============================
 def poisson_pmf(k: int, lam: float) -> float:
     if lam <= 0:
         return 0.0
     return math.exp(-lam) * (lam ** k) / math.factorial(k)
-
 
 def prob_over_total(lam_home: float, lam_away: float, line: float, max_goals: int = 10) -> float:
     threshold = math.floor(line)
@@ -237,12 +172,10 @@ def prob_over_total(lam_home: float, lam_away: float, line: float, max_goals: in
                 p_le += ph * pa
     return max(0.0, min(1.0, 1.0 - p_le))
 
-
 def prob_btts(lam_home: float, lam_away: float) -> float:
     p_home0 = poisson_pmf(0, lam_home)
     p_away0 = poisson_pmf(0, lam_away)
     return max(0.0, min(1.0, 1.0 - p_home0 - p_away0 + (p_home0 * p_away0)))
-
 
 def prob_1x2(lam_home: float, lam_away: float, max_goals: int = 10) -> Tuple[float, float, float]:
     pH = pD = pA = 0.0
@@ -261,16 +194,13 @@ def prob_1x2(lam_home: float, lam_away: float, max_goals: int = 10) -> Tuple[flo
         pH, pD, pA = pH / s, pD / s, pA / s
     return pH, pD, pA
 
-
 def fair_odds(p: float) -> Optional[float]:
     if p <= 0:
         return None
     return 1.0 / p
 
-
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
-
 
 def compute_team_form(team_id: int, fixtures_ft: List[Dict]) -> Tuple[int, float, float, float, float, float, float]:
     gf = ga = 0
@@ -320,7 +250,6 @@ def compute_team_form(team_id: int, fixtures_ft: List[Dict]) -> Tuple[int, float
 
     return n, gf_pg, ga_pg, gf_home_pg, ga_home_pg, gf_away_pg, ga_away_pg
 
-
 def estimate_lambdas(home_form, away_form, home_adv: float = 1.08) -> Tuple[float, float, str]:
     base = 1.25
     nH, gfH, gaH, gfH_home, gaH_home, gfH_away, gaH_away = home_form
@@ -351,80 +280,162 @@ def estimate_lambdas(home_form, away_form, home_adv: float = 1.08) -> Tuple[floa
 
     return clamp(lam_home, 0.2, 3.5), clamp(lam_away, 0.2, 3.5), ev
 
-
 # =============================
-# Odds parsing + DEBUG helpers
+# Odds extraction (optional)
 # =============================
-def _extract_market_odds(odds_response: List[Dict], market_keywords: List[str], selection_keywords: List[str]) -> Optional[float]:
+def extract_odd(odds_resp: List[Dict], market_name: str, selection_value: str) -> Optional[float]:
+    """
+    API-SPORTS odds markets are strings like:
+    - "Match Winner" with values Home/Draw/Away
+    - "Goals Over/Under" with values "Over 2.5"
+    - "Both Teams Score" with "Yes"
+    """
+    if not odds_resp:
+        return None
     try:
-        if not odds_response:
-            return None
-        item = odds_response[0]
+        item = odds_resp[0]
         for bk in item.get("bookmakers", []):
             for bet in bk.get("bets", []):
-                bet_name = (bet.get("name") or "").lower()
-                if all(k.lower() in bet_name for k in market_keywords):
+                if (bet.get("name") or "").strip().lower() == market_name.lower():
                     for v in bet.get("values", []):
-                        vname = (v.get("value") or "").lower()
-                        if all(sk.lower() in vname for sk in selection_keywords):
+                        if (v.get("value") or "").strip().lower() == selection_value.lower():
                             odd = v.get("odd")
-                            if odd is None:
-                                continue
-                            return float(odd)
+                            return float(odd) if odd is not None else None
         return None
     except Exception:
         return None
 
-
-def summarize_odds_names(odds_response: List[Dict]) -> Dict:
-    """Lista nomes de bookmakers, mercados (bets) e algumas selections (values) para ajustar keywords."""
-    out = {"bookmakers": []}
-    if not odds_response:
-        return out
+# =============================
+# IA: Analista (OpenAI)
+# =============================
+def get_openai_client() -> Optional["OpenAI"]:
+    if not HAS_OPENAI:
+        return None
     try:
-        item = odds_response[0]
-        for bk in item.get("bookmakers", []):
-            bk_name = bk.get("name")
-            markets = []
-            for bet in bk.get("bets", []):
-                bet_name = bet.get("name")
-                vals = [v.get("value") for v in bet.get("values", [])][:6]
-                markets.append({"bet_name": bet_name, "values_sample": vals})
-            out["bookmakers"].append({"name": bk_name, "markets": markets[:25]})
-        return out
+        return OpenAI(api_key=_get_secret("OPENAI_API_KEY"))
     except Exception:
-        return out
+        return None
 
+@st.cache_data(ttl=60 * 60)
+def ia_commentary(
+    home: str,
+    away: str,
+    league: str,
+    market: str,
+    pick: str,
+    prob: float,
+    lam_h: float,
+    lam_a: float,
+    evidence: str,
+    odd: Optional[float],
+    fair: Optional[float],
+    edge: Optional[float],
+) -> str:
+    """
+    Cacheado para não gastar tokens repetindo o mesmo jogo.
+    """
+    client = get_openai_client()
+    if client is None:
+        return "IA indisponível (biblioteca ou chave não configurada)."
+
+    odd_txt = f"{odd:.2f}" if odd is not None else "—"
+    fair_txt = f"{fair:.2f}" if fair is not None else "—"
+    edge_txt = f"{edge*100:.1f}%" if edge is not None else "—"
+
+    prompt = f"""
+Você é um analista de futebol focado em probabilidade e gestão de risco.
+Explique o palpite de forma objetiva e curta (máx. 6 linhas), sem prometer ganhos.
+
+Jogo: {home} vs {away}
+Liga: {league}
+Mercado: {market}
+Pick: {pick}
+
+Métricas do modelo:
+- Probabilidade: {prob:.3f}
+- Lambdas (λ casa/fora): {lam_h:.2f} / {lam_a:.2f}
+- Evidência (amostra): {evidence}
+- Odd (se disponível): {odd_txt}
+- Odd justa: {fair_txt}
+- Edge: {edge_txt}
+
+Regras:
+- Se evidência for BAIXA, enfatize cautela.
+- Liste 2 razões quantitativas (ex.: tendência de gols, BTTS, equilíbrio 1X2).
+- Liste 1 risco (variância, amostra, etc.).
+"""
+    try:
+        resp = client.chat.completions.create(
+            model=st.secrets.get("OPENAI_MODEL", "gpt-4o-mini"),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        return f"IA indisponível neste momento: {e}"
 
 # =============================
-# Limit to top leagues
+# Picks builder
 # =============================
-def limit_to_top_leagues(fixtures: List[Dict], max_leagues: int) -> List[Dict]:
-    league_counts: Dict[int, int] = {}
-    for fx in fixtures:
-        lid = fx.get("league", {}).get("id")
-        if lid is None:
-            continue
-        league_counts[int(lid)] = league_counts.get(int(lid), 0) + 1
+def render_picks(picks: List[Dict], use_ai: bool):
+    if not picks:
+        st.info("Sem picks para mostrar.")
+        return
 
-    top_ids = [lid for lid, _ in sorted(league_counts.items(), key=lambda x: x[1], reverse=True)[:max_leagues]]
-    top_set = set(top_ids)
-    return [fx for fx in fixtures if int(fx.get("league", {}).get("id", -1)) in top_set]
+    for p in picks:
+        odd_txt = f"{p['odd']:.2f}" if p["odd"] is not None else "—"
+        fair_txt = f"{p['fair']:.2f}" if p["fair"] is not None else "—"
+        edge_txt = f"{p['edge']*100:.1f}%" if p.get("edge") is not None else "—"
 
+        st.markdown(
+            f"""
+<div class="card card-left">
+  <div class="meta"><b>{p['time']}</b> &nbsp; | &nbsp; <b>{p['league']}</b></div>
+  <div class="pickline"><b>{p['match']}</b></div>
+  <div class="pickline">Pick: <b>{p['pick']}</b></div>
+  <div class="kpi">
+    <span>Prob: <b>{p['prob']:.3f}</b></span>
+    <span>Odd: <b>{odd_txt}</b></span>
+    <span>Justa: <b>{fair_txt}</b></span>
+    <span>Edge: <b>{edge_txt}</b></span>
+    <span>Evid.: <b>{p['ev']}</b></span>
+    <span>λ: <b>{p['lam_h']:.2f}-{p['lam_a']:.2f}</b></span>
+  </div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
 
-# =============================
-# Picks builder + Progress callbacks
-# =============================
-def build_picks_for_market(
+        if use_ai:
+            with st.expander("IA: análise do palpite", expanded=False):
+                st.write(
+                    ia_commentary(
+                        home=p["home"],
+                        away=p["away"],
+                        league=p["league"],
+                        market=p["market"],
+                        pick=p["pick"],
+                        prob=p["prob"],
+                        lam_h=p["lam_h"],
+                        lam_a=p["lam_a"],
+                        evidence=p["ev"],
+                        odd=p["odd"],
+                        fair=p["fair"],
+                        edge=p.get("edge"),
+                    )
+                )
+
+def build_market_picks(
     fixtures: List[Dict],
     market: str,
+    max_picks: int,
     last_n_form: int,
     home_adv: float,
     one_per_league: bool,
+    min_prob: float,
     min_odd: float,
     zebra_min_odd: float,
-    max_picks: int,
-    bookmaker: int,
+    bookmaker: Optional[int],
     progress_cb=None,
     progress_text_cb=None,
 ) -> List[Dict]:
@@ -432,25 +443,25 @@ def build_picks_for_market(
     used_leagues = set()
 
     total = max(1, len(fixtures))
-    processed = 0
-
-    for fx in fixtures:
-        processed += 1
+    for idx, fx in enumerate(fixtures, start=1):
         if progress_cb:
-            progress_cb(processed / total)
+            progress_cb(idx / total)
         if progress_text_cb:
-            progress_text_cb(f"A analisar {processed}/{total} jogos...")
+            progress_text_cb(f"A analisar {idx}/{total} jogos...")
 
         try:
             fixture_id = int(fx["fixture"]["id"])
-            league_id = int(fx["league"]["id"])
-            league_name = fx["league"]["name"]
+            league = fx["league"]["name"]
+            if one_per_league and league in used_leagues:
+                continue
+
+            dt = parse_fixture_time_local(fx)
+            if not dt:
+                continue
+
             home = fx["teams"]["home"]
             away = fx["teams"]["away"]
             home_id, away_id = int(home["id"]), int(away["id"])
-
-            if one_per_league and league_id in used_leagues:
-                continue
 
             home_last = get_last_team_fixtures(home_id, last=last_n_form, status="FT")
             away_last = get_last_team_fixtures(away_id, last=last_n_form, status="FT")
@@ -460,127 +471,110 @@ def build_picks_for_market(
 
             odds_resp = get_odds_for_fixture(fixture_id, bookmaker=bookmaker)
 
-            dt_local = parse_fixture_time_local(fx)
-            time_str = dt_local.strftime("%H:%M") if dt_local else "??:??"
-            match_name = f"{home['name']} vs {away['name']}"
+            time_str = dt.strftime("%H:%M")
+            match = f"{home['name']} vs {away['name']}"
 
-            def push(pick_name: str, prob: float, odd: float):
-                fo = fair_odds(prob) or 0.0
-                edge = (odd / fo) - 1.0 if fo > 0 else None
+            def add_pick(pick_name: str, prob: float, odd: Optional[float], fair: Optional[float], edge: Optional[float]):
                 picks.append({
-                    "league_id": league_id,
-                    "league": league_name,
                     "time": time_str,
-                    "match": match_name,
+                    "league": league,
+                    "match": match,
+                    "home": home["name"],
+                    "away": away["name"],
+                    "market": market,
                     "pick": pick_name,
                     "prob": prob,
                     "odd": odd,
-                    "fair": fo,
+                    "fair": fair,
                     "edge": edge,
                     "ev": ev,
-                    "lam": (lam_h, lam_a),
+                    "lam_h": lam_h,
+                    "lam_a": lam_a,
                 })
-                used_leagues.add(league_id)
+                used_leagues.add(league)
 
-            if market == "Over 1.5":
-                p = prob_over_total(lam_h, lam_a, 1.5)
-                odd = _extract_market_odds(odds_resp, ["goals over/under"], ["over 1.5"])
-                if odd and odd >= min_odd:
-                    push("Over 1.5", p, odd)
-
-            elif market == "Over 2.5":
-                p = prob_over_total(lam_h, lam_a, 2.5)
-                odd = _extract_market_odds(odds_resp, ["goals over/under"], ["over 2.5"])
-                if odd and odd >= min_odd:
-                    push("Over 2.5", p, odd)
+            # --- compute by market ---
+            if market == "1X2":
+                pH, pD, pA = prob_1x2(lam_h, lam_a)
+                cands = [
+                    ("Casa", pH, extract_odd(odds_resp, "Match Winner", "Home")),
+                    ("Empate", pD, extract_odd(odds_resp, "Match Winner", "Draw")),
+                    ("Fora", pA, extract_odd(odds_resp, "Match Winner", "Away")),
+                ]
+                # escolher melhor
+                best = None
+                best_score = -1.0
+                for nm, pr, od in cands:
+                    if pr < min_prob:
+                        continue
+                    if od is not None and od < min_odd:
+                        continue
+                    score = pr if od is None else pr * od
+                    if score > best_score:
+                        best_score = score
+                        best = (nm, pr, od)
+                if best:
+                    nm, pr, od = best
+                    fo = fair_odds(pr)
+                    ed = ((od / fo) - 1.0) if (od is not None and fo) else None
+                    add_pick(f"1X2: {nm}", pr, od, fo, ed)
 
             elif market == "BTTS":
-                p = prob_btts(lam_h, lam_a)
-                odd = _extract_market_odds(odds_resp, ["both teams score"], ["yes"])
-                if odd and odd >= min_odd:
-                    push("BTTS (Yes)", p, odd)
-
-            elif market == "1X2":
-                pH, pD, pA = prob_1x2(lam_h, lam_a)
-                odd_home = _extract_market_odds(odds_resp, ["match winner"], ["home"])
-                odd_draw = _extract_market_odds(odds_resp, ["match winner"], ["draw"])
-                odd_away = _extract_market_odds(odds_resp, ["match winner"], ["away"])
-
-                candidates = []
-                if odd_home and odd_home >= min_odd:
-                    candidates.append(("Home", pH, odd_home))
-                if odd_draw and odd_draw >= min_odd:
-                    candidates.append(("Draw", pD, odd_draw))
-                if odd_away and odd_away >= min_odd:
-                    candidates.append(("Away", pA, odd_away))
-
-                best = None
-                best_edge = -999
-                for name, p, o in candidates:
-                    fo = fair_odds(p) or 0.0
-                    if fo <= 0:
-                        continue
-                    e = (o / fo) - 1.0
-                    if e > best_edge:
-                        best_edge = e
-                        best = (name, p, o)
-
-                if best:
-                    name, p, o = best
-                    push(f"1X2: {name}", p, o)
-
-            elif market in ("DC+Over1.5", "DC+Over2.5"):
-                line = 1.5 if market == "DC+Over1.5" else 2.5
-                p_over = prob_over_total(lam_h, lam_a, line)
-                odd_over = _extract_market_odds(odds_resp, ["goals over/under"], [f"over {line}"])
-                if not odd_over or odd_over < min_odd:
+                pr = prob_btts(lam_h, lam_a)
+                if pr < min_prob:
                     continue
+                od = extract_odd(odds_resp, "Both Teams Score", "Yes")
+                if od is not None and od < min_odd:
+                    continue
+                fo = fair_odds(pr)
+                ed = ((od / fo) - 1.0) if (od is not None and fo) else None
+                add_pick("BTTS: Sim", pr, od, fo, ed)
 
-                pH, pD, pA = prob_1x2(lam_h, lam_a)
-                odd_1x = _extract_market_odds(odds_resp, ["double chance"], ["home/draw"]) or _extract_market_odds(odds_resp, ["double chance"], ["1x"])
-                odd_x2 = _extract_market_odds(odds_resp, ["double chance"], ["draw/away"]) or _extract_market_odds(odds_resp, ["double chance"], ["x2"])
-                odd_12 = _extract_market_odds(odds_resp, ["double chance"], ["home/away"]) or _extract_market_odds(odds_resp, ["double chance"], ["12"])
+            elif market == "Over 1.5":
+                pr = prob_over_total(lam_h, lam_a, 1.5)
+                if pr < min_prob:
+                    continue
+                od = extract_odd(odds_resp, "Goals Over/Under", "Over 1.5")
+                if od is not None and od < min_odd:
+                    continue
+                fo = fair_odds(pr)
+                ed = ((od / fo) - 1.0) if (od is not None and fo) else None
+                add_pick("Over 1.5", pr, od, fo, ed)
 
-                for dc_name, p_dc, odd_dc in [
-                    ("1X", pH + pD, odd_1x),
-                    ("X2", pA + pD, odd_x2),
-                    ("12", pH + pA, odd_12),
-                ]:
-                    if not odd_dc or odd_dc < min_odd:
-                        continue
-                    p_combo = clamp(p_dc * p_over, 0.0, 1.0)
-                    odd_proxy = odd_dc * odd_over
-                    if odd_proxy >= min_odd:
-                        push(f"{dc_name} + Over {line} (odd proxy)", p_combo, odd_proxy)
+            elif market == "Over 2.5":
+                pr = prob_over_total(lam_h, lam_a, 2.5)
+                if pr < min_prob:
+                    continue
+                od = extract_odd(odds_resp, "Goals Over/Under", "Over 2.5")
+                if od is not None and od < min_odd:
+                    continue
+                fo = fair_odds(pr)
+                ed = ((od / fo) - 1.0) if (od is not None and fo) else None
+                add_pick("Over 2.5", pr, od, fo, ed)
 
             elif market == "Zebras":
+                # zebra só faz sentido com odd. Se não tiver odd, pula.
                 pH, pD, pA = prob_1x2(lam_h, lam_a)
-                odd_home = _extract_market_odds(odds_resp, ["match winner"], ["home"])
-                odd_draw = _extract_market_odds(odds_resp, ["match winner"], ["draw"])
-                odd_away = _extract_market_odds(odds_resp, ["match winner"], ["away"])
-
-                zebra_candidates = []
-                if odd_home and odd_home >= zebra_min_odd:
-                    zebra_candidates.append(("Home", pH, odd_home))
-                if odd_away and odd_away >= zebra_min_odd:
-                    zebra_candidates.append(("Away", pA, odd_away))
-                if odd_draw and odd_draw >= zebra_min_odd:
-                    zebra_candidates.append(("Draw", pD, odd_draw))
-
-                best = None
-                best_edge = -999
-                for name, p, o in zebra_candidates:
-                    fo = fair_odds(p) or 0.0
-                    if fo <= 0:
+                cands = [
+                    ("Casa", pH, extract_odd(odds_resp, "Match Winner", "Home")),
+                    ("Empate", pD, extract_odd(odds_resp, "Match Winner", "Draw")),
+                    ("Fora", pA, extract_odd(odds_resp, "Match Winner", "Away")),
+                ]
+                zebra = []
+                for nm, pr, od in cands:
+                    if od is None:
                         continue
-                    e = (o / fo) - 1.0
-                    if e > best_edge:
-                        best_edge = e
-                        best = (name, p, o)
-
-                if best:
-                    name, p, o = best
-                    push(f"Zebra: {name}", p, o)
+                    if od < zebra_min_odd:
+                        continue
+                    if pr < 0.05:
+                        continue
+                    fo = fair_odds(pr)
+                    ed = ((od / fo) - 1.0) if fo else None
+                    zebra.append((nm, pr, od, fo, ed))
+                if zebra:
+                    zebra = sorted(zebra, key=lambda x: (-(x[4] if x[4] is not None else -999), -x[1]))
+                    nm, pr, od, fo, ed = zebra[0]
+                    add_pick(f"Zebra: {nm}", pr, od, fo, ed)
 
         except Exception:
             continue
@@ -590,55 +584,33 @@ def build_picks_for_market(
     if progress_text_cb:
         progress_text_cb("Concluído.")
 
-    picks = sorted(
-        picks,
-        key=lambda x: (-999 if x.get("edge") is None else -x["edge"], -x.get("prob", 0.0)),
-    )[:max_picks]
-    return picks
+    # ranking: edge quando existir; senão por prob
+    picks = sorted(picks, key=lambda x: (-(x["edge"] if x["edge"] is not None else -999), -x["prob"]))
+    return picks[:max_picks]
 
-
-def render_picks(picks: List[Dict]):
-    if not picks:
-        st.info("Sem picks que passem nos filtros (ou odds indisponíveis).")
-        return
-
-    for p in picks:
-        edge = p.get("edge")
-        edge_txt = f"{edge*100:.1f}%" if edge is not None else "n/a"
-        st.markdown(
-            f"""
-<div class="card card-left">
-  <div class="meta"><span class="badge">{p['time']}</span> &nbsp; <b>{p['league']}</b></div>
-  <div class="pickline"><b>{p['match']}</b></div>
-  <div class="pickline">Pick: <b>{p['pick']}</b></div>
-  <div class="kpi">
-    <span>Prob: <b>{p['prob']:.3f}</b></span>
-    <span>Odd: <b>{p['odd']:.2f}</b></span>
-    <span>Justa: <b>{p['fair']:.2f}</b></span>
-    <span>Edge: <b>{edge_txt}</b></span>
-    <span>Evid.: <b>{p['ev']}</b></span>
-    <span>λ: <b>{p['lam'][0]:.2f}-{p['lam'][1]:.2f}</b></span>
-  </div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-
+def limit_to_top_leagues(fixtures: List[Dict], max_leagues: int) -> List[Dict]:
+    league_counts: Dict[int, int] = {}
+    for fx in fixtures:
+        lid = fx.get("league", {}).get("id")
+        if lid is None:
+            continue
+        league_counts[int(lid)] = league_counts.get(int(lid), 0) + 1
+    top_ids = [lid for lid, _ in sorted(league_counts.items(), key=lambda x: x[1], reverse=True)[:max_leagues]]
+    top_set = set(top_ids)
+    return [fx for fx in fixtures if int(fx.get("league", {}).get("id", -1)) in top_set]
 
 # =============================
 # MAIN
 # =============================
 def main():
-    # Autorefresh só se não estiver pausado
+    # relógio contínuo sem “piscar” durante geração
     if HAS_AUTOREFRESH and not st.session_state["pause_refresh"]:
-        st_autorefresh(interval=1000, key="clock")  # 1s
+        st_autorefresh(interval=1000, key="clock")
     else:
         time.sleep(0.01)
 
     now_local = datetime.now(LOCAL_TZ)
-
-    whatsapp_number = "258867926665"
-    whatsapp_link = f"https://wa.me/{whatsapp_number}"
+    whatsapp_link = "https://wa.me/258867926665"
 
     st.markdown(
         f"""
@@ -665,22 +637,30 @@ def main():
         last_n_form = st.slider("Forma (últimos jogos FT)", 4, 20, 10, 1)
         home_adv = st.slider("Vantagem de casa", 1.00, 1.20, 1.08, 0.01)
 
-        bookmaker = st.number_input("Bookmaker ID (odds)", value=8, min_value=1, step=1)
+        min_prob = st.slider("Prob mínima para mostrar", 0.50, 0.90, 0.65, 0.01)
+
+        bookmaker = st.number_input("Bookmaker ID (odds) (opcional)", value=0, min_value=0, step=1)
+        bookmaker_val = None if bookmaker == 0 else int(bookmaker)
+
         min_odd = st.number_input("Odd mínima (normais)", value=1.30, min_value=1.01, step=0.01)
         zebra_min_odd = st.number_input("Odd mínima (zebras)", value=4.00, min_value=2.00, step=0.10)
 
-        st.caption("Para relógio contínuo: adicione 'streamlit-autorefresh' ao requirements.txt.")
+        use_ai = st.checkbox(
+            "IA ligada (explica os palpites)",
+            value=IA_ENABLED_DEFAULT and HAS_OPENAI and ("OPENAI_API_KEY" in st.secrets),
+        )
+        if use_ai and not HAS_OPENAI:
+            st.warning("Biblioteca OpenAI não instalada. Adicione 'openai' ao requirements.txt.")
+        st.caption("Nota: IA não garante ganhos; serve para explicar e destacar riscos.")
 
-    # fixtures today
+    # fixtures hoje/futuros
     date_to_use = now_local.date()
     fixtures = get_fixtures_by_date(date_to_use.strftime("%Y-%m-%d"))
     fixtures = [fx for fx in fixtures if is_future_fixture(fx, now_local)]
 
-    # tomorrow if empty
     if not fixtures and auto_tomorrow_if_empty:
         date_to_use = (now_local + timedelta(days=1)).date()
         fixtures = get_fixtures_by_date(date_to_use.strftime("%Y-%m-%d"))
-        fixtures = [fx for fx in fixtures if parse_fixture_time_local(fx) is not None]
 
     if not fixtures:
         st.error("Nenhum jogo encontrado.")
@@ -689,64 +669,9 @@ def main():
     fixtures = limit_to_top_leagues(fixtures, max_leagues=max_leagues)
     st.caption(f"Data analisada: {date_to_use.strftime('%d/%m/%Y')} | Jogos após limite de ligas: {len(fixtures)}")
 
-    # =============================
-    # DEBUG ODDS (persistente)
-    # =============================
-    with st.expander("🛠️ Debug: TESTAR ODDS (clique aqui)", expanded=False):
-        st.write("Isto mostra o JSON real que a sua conta está a receber no endpoint /odds.")
-        colA, colB = st.columns([1, 1])
+    tabs = st.tabs(["🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "🟣 Zebras"])
 
-        with colA:
-            if st.button("TESTAR ODDS AGORA", key="btn_test_odds"):
-                st.session_state["pause_refresh"] = True  # evita 'piscar'
-
-                try:
-                    fx0 = fixtures[0]
-                    fid = int(fx0["fixture"]["id"])
-                    resp = get_odds_for_fixture(fid, bookmaker=bookmaker)
-
-                    st.session_state["debug_odds_raw"] = {
-                        "fixture_id": fid,
-                        "response_len": (len(resp) if isinstance(resp, list) else None),
-                        "response_preview": (resp[:1] if isinstance(resp, list) else resp),
-                    }
-                    st.session_state["debug_odds_summary"] = summarize_odds_names(resp)
-                    st.session_state["debug_extract_test"] = {
-                        "1X2 Home": _extract_market_odds(resp, ["match winner"], ["home"]),
-                        "1X2 Draw": _extract_market_odds(resp, ["match winner"], ["draw"]),
-                        "1X2 Away": _extract_market_odds(resp, ["match winner"], ["away"]),
-                        "BTTS Yes": _extract_market_odds(resp, ["both teams score"], ["yes"]),
-                        "Over 1.5": _extract_market_odds(resp, ["goals over/under"], ["over 1.5"]),
-                        "Over 2.5": _extract_market_odds(resp, ["goals over/under"], ["over 2.5"]),
-                        "DC 1X": _extract_market_odds(resp, ["double chance"], ["home/draw"]) or _extract_market_odds(resp, ["double chance"], ["1x"]),
-                    }
-
-                except Exception as e:
-                    st.session_state["debug_odds_raw"] = {"error": str(e)}
-                    st.session_state["debug_odds_summary"] = None
-                    st.session_state["debug_extract_test"] = None
-
-        with colB:
-            if st.button("RETOMAR RELÓGIO", key="btn_resume_clock"):
-                st.session_state["pause_refresh"] = False
-
-        st.markdown("<div class='debugbox'>", unsafe_allow_html=True)
-        if st.session_state["debug_odds_raw"] is None:
-            st.info("Clique em 'TESTAR ODDS AGORA' para ver o JSON. O relógio será pausado automaticamente.")
-        else:
-            st.subheader("Resultado do Debug")
-            st.json(st.session_state["debug_odds_raw"])
-
-            st.subheader("Resumo (bookmakers / mercados / selections)")
-            st.json(st.session_state["debug_odds_summary"])
-
-            st.subheader("Teste de extração (keywords atuais)")
-            st.json(st.session_state["debug_extract_test"])
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    # tabs
-    tabs = st.tabs(["🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "👥 DC+O1.5", "👥 DC+O2.5", "🟣 Zebras"])
-    markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5", "Zebras"]
+    markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "Zebras"]
 
     for tab, market in zip(tabs, markets):
         with tab:
@@ -755,48 +680,43 @@ def main():
             col1, col2 = st.columns([1, 2])
             with col1:
                 if st.button(f"Gerar Top {max_picks}", key=f"btn_{market}"):
-                    # também pausa o relógio durante cálculo (melhora UX no mobile)
                     st.session_state["pause_refresh"] = True
 
-                    progress_placeholder = st.empty()
-                    text_placeholder = st.empty()
-                    bar = progress_placeholder.progress(0)
-                    text_placeholder.write("A iniciar...")
+                    prog = st.progress(0)
+                    msg = st.empty()
+                    msg.write("A iniciar...")
 
                     def _p(v: float):
-                        bar.progress(int(v * 100))
+                        prog.progress(int(v * 100))
 
-                    def _t(msg: str):
-                        text_placeholder.write(msg)
+                    def _t(m: str):
+                        msg.write(m)
 
-                    picks = build_picks_for_market(
+                    picks = build_market_picks(
                         fixtures=fixtures,
                         market=market,
+                        max_picks=max_picks,
                         last_n_form=last_n_form,
                         home_adv=home_adv,
                         one_per_league=one_per_league,
+                        min_prob=min_prob,
                         min_odd=min_odd,
                         zebra_min_odd=zebra_min_odd,
-                        max_picks=max_picks,
-                        bookmaker=bookmaker,
+                        bookmaker=bookmaker_val,
                         progress_cb=_p,
                         progress_text_cb=_t,
                     )
                     st.session_state[f"picks_{market}"] = picks
-                    text_placeholder.write("Concluído.")
-
-                    # mantém pausado até você clicar "RETOMAR RELÓGIO"
-                    # (se quiser auto-retomar, troque para False aqui)
-                    # st.session_state["pause_refresh"] = False
+                    msg.write("Concluído. (Você pode retomar o relógio recarregando ou desligando pausa manualmente.)")
 
             with col2:
                 st.write(
-                    "Ranking por edge (odd mercado vs odd justa do modelo). "
-                    "Se não aparecerem picks, o feed de odds pode não ter linhas para o jogo/mercado."
+                    "O modelo calcula probabilidades com base em forma (últimos jogos FT) e Poisson. "
+                    "Se odds estiverem indisponíveis no seu plano, o app ainda mostra picks por probabilidade."
                 )
+                st.markdown("<div class='smallnote'>Dica: para reduzir custo, deixe a IA ligada só quando quiser ler as análises.</div>", unsafe_allow_html=True)
 
-            render_picks(st.session_state.get(f"picks_{market}", []))
-
+            render_picks(st.session_state.get(f"picks_{market}", []), use_ai=use_ai)
 
 if __name__ == "__main__":
     main()
