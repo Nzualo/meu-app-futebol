@@ -13,7 +13,7 @@ LOCAL_TZ = pytz.timezone("Africa/Maputo")
 API_BASE = "https://v3.football.api-sports.io"
 MAX_LEAGUES_DEFAULT = 20
 
-st.set_page_config(page_title="Elite Scanner 4.1", layout="wide")
+st.set_page_config(page_title="Melhores Palpites do Dia", layout="wide")
 
 st.markdown(
     """
@@ -24,34 +24,64 @@ st.markdown(
 .muted { color: #aab; font-size: 0.90rem; }
 .badge { background-color: #00ff00; color: black; padding: 4px 10px; border-radius: 14px;
          font-weight: 700; display:inline-block; }
-.topbar {
-  background: linear-gradient(135deg, rgba(0,255,0,0.16), rgba(26,28,36,0.95));
-  border: 1px solid rgba(0,255,0,0.22);
-  border-radius: 14px;
-  padding: 14px 16px;
+
+/* ===== Barcelona header ===== */
+.barca-header {
+  background: linear-gradient(135deg, #004d98, #a50044);
+  border-radius: 16px;
+  padding: 16px 18px;
   margin-bottom: 14px;
+  border: 1px solid rgba(255,255,255,0.18);
 }
-.topbar h2 { margin: 0; color: #eaffea; }
-.topbar p { margin: 6px 0 0 0; color: #cfd8e3; }
-a.whatsapp {
-  display:inline-block; text-decoration:none; font-weight:800;
-  padding: 8px 14px; border-radius: 18px;
-  border: 1px solid rgba(0,255,0,0.35);
-  background: rgba(0,255,0,0.18);
-  color: #eaffea;
-  margin-left: 10px;
+.barca-title {
+  display: flex;
+  align-items: center;
+  gap: 14px;
 }
-a.whatsapp:hover { background: rgba(0,255,0,0.26); }
-.sig {
+.barca-title img {
+  width: 52px;
+  height: 52px;
+}
+.barca-title h2 {
+  margin: 0;
+  color: #ffffff;
+  font-size: 1.35rem;
+  font-weight: 900;
+}
+.barca-meta {
+  margin-top: 8px;
+  color: #f1f1f1;
+  font-size: 0.95rem;
+}
+.barca-note {
+  margin-top: 10px;
+  font-size: 0.86rem;
+  color: #ffecec;
+  opacity: 0.95;
+}
+.barca-sign {
   display:inline-block;
+  margin-top: 10px;
   padding: 6px 12px;
   border-radius: 18px;
-  border: 1px solid rgba(0,255,0,0.28);
-  background: rgba(0,255,0,0.12);
-  color: #d9ffd9;
-  font-weight: 800;
-  margin-left: 10px;
+  background: rgba(255,255,255,0.18);
+  font-weight: 900;
+  color: #ffffff;
 }
+.barca-wa {
+  display:inline-block;
+  margin-left: 10px;
+  padding: 6px 14px;
+  border-radius: 18px;
+  background: #25D366;
+  color: #000;
+  font-weight: 900;
+  text-decoration: none;
+}
+.barca-wa:hover { background:#1ebe5d; }
+
+/* progress text */
+.ptext { color: #cfd8e3; font-size: 0.90rem; margin-top: 6px; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -312,19 +342,16 @@ def build_picks_for_market(
     picks: List[Dict] = []
     used_leagues = set()
 
-    # === PROGRESS BAR (adição mínima, sem mudar lógica) ===
+    # === barra de progresso (somente quando clicou em Gerar) ===
     show_progress = bool(st.session_state.get("_show_progress", False))
     pbar = st.progress(0) if show_progress else None
     ptxt = st.empty() if show_progress else None
     total = max(1, len(fixtures))
-    # =====================================================
 
     for idx, fx in enumerate(fixtures, start=1):
-        # === update progress ===
         if show_progress and pbar is not None and ptxt is not None:
             pbar.progress(min(100, int(idx * 100 / total)))
-            ptxt.write(f"A processar {idx}/{total} jogos...")
-        # =======================
+            ptxt.markdown(f"<div class='ptext'>A analisar {idx}/{total} jogos...</div>", unsafe_allow_html=True)
 
         try:
             fixture_id = int(fx["fixture"]["id"])
@@ -472,11 +499,11 @@ def build_picks_for_market(
         except Exception:
             continue
 
-    # limpar progresso
     if show_progress and pbar is not None and ptxt is not None:
         pbar.progress(100)
-        ptxt.write("Concluído.")
+        ptxt.markdown("<div class='ptext'>Concluído.</div>", unsafe_allow_html=True)
 
+    # ordena por edge desc (se tiver), depois prob desc
     picks = sorted(
         picks,
         key=lambda x: (
@@ -521,23 +548,32 @@ def render_picks(picks: List[Dict]):
 def main():
     now_local = datetime.now(LOCAL_TZ)
 
-    # === ADIÇÃO: título + localização exata + assinatura + WhatsApp ===
+    # === Header Barcelona + localização Inhassoro + assinatura + WhatsApp + nota curta ===
     st.markdown(
         f"""
-<div class="topbar">
-  <h2>Melhores Palpites e Possível Zebras do Dia.</h2>
-  <p>
+<div class="barca-header">
+  <div class="barca-title">
+    <img src="https://upload.wikimedia.org/wikipedia/en/4/47/FC_Barcelona_%28crest%29.svg" alt="FC Barcelona">
+    <h2>Melhores Palpites e Possível Zebras do Dia</h2>
+  </div>
+
+  <div class="barca-meta">
     <b>Local:</b> Inhassoro &nbsp; | &nbsp; <b>Hora:</b> {now_local.strftime('%H:%M:%S')}
-    <span class="sig">By Nzualo</span>
-    <a class="whatsapp" href="https://wa.me/258867926665" target="_blank" rel="noopener noreferrer">WhatsApp</a>
-  </p>
+  </div>
+
+  <div class="barca-note">
+    Nota: São apenas probabilidades estatísticas; não há garantias. Aposte com responsabilidade e por sua conta e risco.
+  </div>
+
+  <div>
+    <span class="barca-sign">By Nzualo</span>
+    <a class="barca-wa" href="https://wa.me/258867926665" target="_blank" rel="noopener noreferrer">WhatsApp</a>
+  </div>
 </div>
 """,
         unsafe_allow_html=True,
     )
-    # ================================================================
-
-    st.title("🛡️ Elite Scanner 4.1 — Abas com botão Gerar")
+    # ================================================================================
 
     with st.sidebar:
         st.subheader("Configuração rápida")
@@ -586,7 +622,7 @@ def main():
             col1, col2 = st.columns([1, 2])
             with col1:
                 if st.button(f"🚀 Gerar Top {max_picks}", key=f"btn_{market}"):
-                    # Ativa progresso só durante esta geração
+                    # ativa progresso só durante este clique
                     st.session_state["_show_progress"] = True
                     try:
                         picks = build_picks_for_market(
