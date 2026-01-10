@@ -1,6 +1,7 @@
 streamlit
 requests
 pandas
-openai
 pytz
+openai
+reportlab
 streamlit-autorefresh
