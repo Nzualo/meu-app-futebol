@@ -22,6 +22,10 @@ LOCAL_TZ = pytz.timezone("Africa/Maputo")
 MAX_LEAGUES_DEFAULT = 20
 ALLSPORTS_BASE = "https://apiv2.allsportsapi.com/football/"
 
+# Top Tips odd range (NOVO - conforme pedido)
+TOP_TIPS_MIN_ODD = 1.40
+TOP_TIPS_MAX_ODD = 2.00
+
 st.set_page_config(page_title="Melhores Palpites do Dia", layout="wide")
 
 st.markdown(
@@ -79,7 +83,7 @@ def provider_mode() -> str:
 
 
 # =============================
-# OpenAI (Passo 3)
+# OpenAI
 # =============================
 @st.cache_resource
 def get_openai_client() -> OpenAI:
@@ -535,7 +539,7 @@ def limit_to_top_leagues(fixtures: List[Dict], max_leagues: int) -> List[Dict]:
 
 
 # =============================
-# PASSO 4 — TOP TIPS SCORE (melhor ranking)
+# PASSO 4 — TOP TIPS SCORE
 # =============================
 def _ev_weight(ev: str) -> float:
     ev = (ev or "").upper().strip()
@@ -564,14 +568,12 @@ def top_tip_score(p: Dict, zebra_threshold: float = 4.0) -> float:
     ev_w = _ev_weight(ev)
     penalty = _odd_penalty(odd, zebra_threshold=zebra_threshold)
 
-    # pesos: edge principal, prob reforça estabilidade, evidência reforça confiança,
-    # penaliza odds muito altas para Top Tips não virar só zebras.
     score = (1.8 * edge_val) + (0.9 * prob) + (0.5 * ev_w) - (1.0 * penalty)
     return score
 
 
 # =============================
-# Picks per market (com progress callback)
+# Picks per market
 # =============================
 def build_picks_for_market(
     fixtures: List[Dict],
@@ -810,7 +812,7 @@ def render_picks(picks: List[Dict], ai_enabled: bool, ai_max: int):
 
 
 # =============================
-# TOP TIPS (6-10 juntos) — PASSO 4 aplicado
+# TOP TIPS — agora filtra odds 1.40 a 2.00 (NOVO)
 # =============================
 def build_top_tips(
     fixtures: List[Dict],
@@ -819,8 +821,11 @@ def build_top_tips(
     min_odd: float,
     zebra_min_odd: float,
     top_n: int,
+    tips_min_odd: float = TOP_TIPS_MIN_ODD,
+    tips_max_odd: float = TOP_TIPS_MAX_ODD,
 ) -> List[Dict]:
-    markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5", "Zebras"]
+    # Sem "Zebras" no Top Tips (porque Top Tips deve ficar 1.40–2.00)
+    markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5"]
 
     pbar = st.progress(0)
     ptxt = st.empty()
@@ -838,15 +843,21 @@ def build_top_tips(
             one_per_league=False,
             min_odd=min_odd,
             zebra_min_odd=zebra_min_odd,
-            max_picks=30,
+            max_picks=40,
             progress_cb=None,
         )
         all_candidates.extend(cand)
 
     pbar.progress(100)
-    ptxt.markdown("<div class='ptext'>A selecionar Top Tips...</div>", unsafe_allow_html=True)
+    ptxt.markdown("<div class='ptext'>A filtrar por odds e selecionar Top Tips...</div>", unsafe_allow_html=True)
 
-    # PASSO 4: ordena por score (melhor que só edge/prob)
+    # NOVO: filtro de odds do Top Tips (1.40 a 2.00)
+    all_candidates = [
+        p for p in all_candidates
+        if (p.get("odd") is not None) and (tips_min_odd <= float(p["odd"]) <= tips_max_odd)
+    ]
+
+    # PASSO 4: ordena por score
     all_candidates = sorted(
         all_candidates,
         key=lambda p: top_tip_score(p, zebra_threshold=zebra_min_odd),
@@ -904,10 +915,13 @@ def main():
         st.subheader("Configuração")
         auto_tomorrow_if_empty = st.checkbox("Se hoje não tiver jogos futuros, usar amanhã", value=True)
 
-        # Pool 50–150 (performance)
         pool_size = st.slider("Pool de jogos para análise", 50, 150, 100, 10)
 
         top_tips_n = st.slider("Top Tips (6–10)", 6, 10, 8, 1)
+
+        # NOVO: odds range do Top Tips (fixo por padrão 1.40–2.00, mas editável)
+        tips_min_odd = st.number_input("Top Tips - odd mínima", value=float(TOP_TIPS_MIN_ODD), min_value=1.01, step=0.01)
+        tips_max_odd = st.number_input("Top Tips - odd máxima", value=float(TOP_TIPS_MAX_ODD), min_value=1.01, step=0.01)
 
         max_picks = st.slider("Top picks por aba", 5, 20, 10, 1)
         one_per_league = st.checkbox("1 pick por liga", value=True)
@@ -931,13 +945,11 @@ def main():
 
         debug = st.checkbox("Mostrar diagnóstico (debug)", value=False)
 
-    # Fixtures hoje (futuros)
     date_to_use = now_local.date()
     date_str = date_to_use.strftime("%Y-%m-%d")
     fixtures_raw = get_fixtures_by_date(date_str)
     fixtures = [fx for fx in fixtures_raw if is_future_fixture(fx, now_local)]
 
-    # Amanhã só se: hoje tinha jogos mas nenhum futuro
     if auto_tomorrow_if_empty and (len(fixtures_raw) > 0) and (len(fixtures) == 0):
         date_to_use = (now_local + timedelta(days=1)).date()
         date_str = date_to_use.strftime("%Y-%m-%d")
@@ -948,10 +960,7 @@ def main():
         st.error("Nenhum jogo encontrado (ou odds indisponíveis).")
         return
 
-    # Limita ligas
     fixtures = limit_to_top_leagues(fixtures, max_leagues=max_leagues)
-
-    # Ordena por hora e limita pool (50–150)
     fixtures = sorted(fixtures, key=lambda fx: parse_fixture_time_local(fx) or datetime.max)
     fixtures = fixtures[:pool_size]
 
@@ -961,8 +970,7 @@ def main():
             st.write("Data usada:", date_str)
             st.write("Agora (local):", now_local.isoformat())
             st.write("Fixtures brutos:", len(fixtures_raw))
-            st.write("Fixtures futuros (antes do limite de ligas):", len([fx for fx in fixtures_raw if is_future_fixture(fx, now_local)]))
-            st.write("Pool final (após limite ligas + corte):", len(fixtures))
+            st.write("Pool final:", len(fixtures))
 
     st.markdown(
         f"🗓️ Data analisada: <span class='badge'>{date_to_use.strftime('%d/%m/%Y')}</span>",
@@ -974,9 +982,9 @@ def main():
         ["⭐ Top Tips", "🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "👥 DC+O1.5", "👥 DC+O2.5", "🟣 Zebras"]
     )
 
-    # ===== Top Tips =====
     with tabs[0]:
-        st.subheader("⭐ Top Tips do Dia (misturado)")
+        st.subheader("⭐ Top Tips do Dia (odds moderadas)")
+        st.caption(f"Filtro Top Tips: odds entre {tips_min_odd:.2f} e {tips_max_odd:.2f}")
         if st.button(f"🚀 Gerar Top Tips ({top_tips_n})", key="btn_toptips"):
             tips = build_top_tips(
                 fixtures=fixtures,
@@ -985,12 +993,13 @@ def main():
                 min_odd=min_odd,
                 zebra_min_odd=zebra_min_odd,
                 top_n=top_tips_n,
+                tips_min_odd=float(tips_min_odd),
+                tips_max_odd=float(tips_max_odd),
             )
             st.session_state["toptips"] = tips
 
         render_picks(st.session_state.get("toptips", []), ai_enabled=ai_enabled and ai_ok, ai_max=ai_max)
 
-    # ===== Outras abas =====
     markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5", "Zebras"]
     for tab, market in zip(tabs[1:], markets):
         with tab:
@@ -1007,26 +1016,23 @@ def main():
                         pbar.progress(min(100, pct))
                         ptxt.markdown(f"<div class='ptext'>A analisar {i}/{tot} jogos...</div>", unsafe_allow_html=True)
 
-                    try:
-                        picks = build_picks_for_market(
-                            fixtures=fixtures,
-                            market=market,
-                            last_n_form=last_n_form,
-                            home_adv=home_adv,
-                            one_per_league=one_per_league,
-                            min_odd=min_odd,
-                            zebra_min_odd=zebra_min_odd,
-                            max_picks=max_picks,
-                            progress_cb=cb,
-                        )
-                        st.session_state[f"picks_{market}"] = picks
-                        pbar.progress(100)
-                        ptxt.markdown("<div class='ptext'>Concluído.</div>", unsafe_allow_html=True)
-                    except Exception as e:
-                        ptxt.markdown(f"<div class='ptext'>Falha: {e}</div>", unsafe_allow_html=True)
+                    picks = build_picks_for_market(
+                        fixtures=fixtures,
+                        market=market,
+                        last_n_form=last_n_form,
+                        home_adv=home_adv,
+                        one_per_league=one_per_league,
+                        min_odd=min_odd,
+                        zebra_min_odd=zebra_min_odd,
+                        max_picks=max_picks,
+                        progress_cb=cb,
+                    )
+                    st.session_state[f"picks_{market}"] = picks
+                    pbar.progress(100)
+                    ptxt.markdown("<div class='ptext'>Concluído.</div>", unsafe_allow_html=True)
 
             with col2:
-                st.write("Critérios: odds mínimas + ranking por edge. Top Tips usa score avançado (Passo 4).")
+                st.write("Critérios: odds mínimas + ranking por edge. Top Tips filtra odds 1.40–2.00 e usa score avançado.")
 
             render_picks(st.session_state.get(f"picks_{market}", []), ai_enabled=ai_enabled and ai_ok, ai_max=ai_max)
 
