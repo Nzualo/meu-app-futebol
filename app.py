@@ -83,7 +83,7 @@ def allsports_get(met: str, params: Dict[str, str], timeout: int = 15) -> Dict:
         return {"success": 0, "result": None, "errors": str(e)}
 
 # =============================
-# Normalização (AllSports -> estrutura parecida com teu código original)
+# Normalização (AllSports -> estrutura do app)
 # =============================
 def _as_int(x) -> Optional[int]:
     try:
@@ -101,6 +101,56 @@ def _parse_allsports_dt_local(ev: Dict) -> Optional[datetime]:
         return LOCAL_TZ.localize(dt)
     except Exception:
         return None
+
+def _parse_score_pair(s: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
+    """
+    Tenta ler placar do AllSports:
+      - "2 - 1"
+      - "2-1"
+      - "2 : 1"
+    """
+    if not s:
+        return None, None
+    try:
+        txt = str(s).strip()
+        # normaliza separadores
+        for sep in [" - ", "-", " : ", ":", "–", "—"]:
+            if sep in txt:
+                parts = [p.strip() for p in txt.split(sep)]
+                if len(parts) >= 2:
+                    h = _as_int(parts[0])
+                    a = _as_int(parts[1])
+                    return h, a
+        return None, None
+    except Exception:
+        return None, None
+
+def _extract_ft_goals_from_raw(ev: Dict) -> Tuple[Optional[int], Optional[int]]:
+    """
+    Robusto: tenta vários campos comuns do AllSports.
+    Prioridade:
+      1) event_final_result (ex. "2 - 1")
+      2) event_ft_result / event_result (se existir)
+      3) event_home_final_result + event_away_final_result (se existir)
+    """
+    # 1) string tipo "2 - 1"
+    for key in ["event_final_result", "event_ft_result", "event_result", "final_result", "ft_result"]:
+        h, a = _parse_score_pair(ev.get(key))
+        if h is not None and a is not None:
+            return h, a
+
+    # 2) campos separados
+    for hk, ak in [
+        ("event_home_final_result", "event_away_final_result"),
+        ("home_final_result", "away_final_result"),
+        ("event_home_result", "event_away_result"),
+    ]:
+        h = _as_int(ev.get(hk))
+        a = _as_int(ev.get(ak))
+        if h is not None and a is not None:
+            return h, a
+
+    return None, None
 
 def _normalize_fixture_allsports(ev: Dict) -> Optional[Dict]:
     try:
@@ -122,6 +172,9 @@ def _normalize_fixture_allsports(ev: Dict) -> Optional[Dict]:
         else:
             short = ev.get("event_status") or "NS"
 
+        # ✅ Passo 2 (parte 1): extrair gols FT reais
+        gh, ga = _extract_ft_goals_from_raw(ev)
+
         return {
             "fixture": {"id": fx_id, "date": iso, "status": {"short": short}},
             "league": {"id": league_id, "name": ev.get("league_name") or "Liga"},
@@ -129,7 +182,7 @@ def _normalize_fixture_allsports(ev: Dict) -> Optional[Dict]:
                 "home": {"id": home_id, "name": ev.get("event_home_team") or "Home"},
                 "away": {"id": away_id, "name": ev.get("event_away_team") or "Away"},
             },
-            "goals": {"home": None, "away": None},
+            "goals": {"home": gh, "away": ga},
             "_raw": ev,
         }
     except Exception:
@@ -158,17 +211,22 @@ def get_last_team_fixtures(team_id: int, last: int = 10, status: str = "FT") -> 
     if provider_mode() != "allsports":
         return []
     today = datetime.now(LOCAL_TZ).date()
-    start = today - timedelta(days=120)
+    start = today - timedelta(days=160)  # um pouco mais largo para garantir FT
 
     data = allsports_get(
         "Fixtures",
-        {"teamId": str(team_id), "from": start.strftime("%Y-%m-%d"), "to": today.strftime("%Y-%m-%d"), "timezone": "Africa/Maputo"},
+        {
+            "teamId": str(team_id),
+            "from": start.strftime("%Y-%m-%d"),
+            "to": today.strftime("%Y-%m-%d"),
+            "timezone": "Africa/Maputo",
+        },
     )
     if str(data.get("success")) != "1":
         return []
 
     res = data.get("result") or []
-    norm = []
+    norm: List[Dict] = []
     for ev in res:
         fx = _normalize_fixture_allsports(ev)
         if not fx:
@@ -176,8 +234,12 @@ def get_last_team_fixtures(team_id: int, last: int = 10, status: str = "FT") -> 
         st_short = (fx.get("fixture", {}).get("status", {}) or {}).get("short", "")
         if status == "FT" and st_short != "FT":
             continue
+        # garante que tem placar (se não tiver, ignora)
+        if fx.get("goals", {}).get("home") is None or fx.get("goals", {}).get("away") is None:
+            continue
         norm.append(fx)
 
+    # ordenar por data desc
     def _dt_key(x):
         dt = parse_fixture_time_local(x)
         return dt.timestamp() if dt else 0.0
@@ -264,55 +326,74 @@ def fair_odds(p: float) -> Optional[float]:
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
-def compute_team_form(team_id: int, fixtures_ft: List[Dict]) -> Tuple[int, float, float, float, float, float, float]:
-    gf = ga = 0
-    n = 0
-    gf_home = ga_home = 0
-    n_home = 0
-    gf_away = ga_away = 0
-    n_away = 0
+# =============================
+# ✅ Passo 2 (parte 2): Forma com peso por recência
+# =============================
+def compute_team_form_weighted(
+    team_id: int,
+    fixtures_ft: List[Dict],
+    decay: float = 0.85,
+) -> Tuple[int, float, float, float, float, float, float]:
+    """
+    fixtures_ft deve vir ordenado do mais recente para o mais antigo (já vem assim).
+    Retorna:
+      n, gf_pg, ga_pg, gf_home_pg, ga_home_pg, gf_away_pg, ga_away_pg
+    Tudo com pesos por recência.
+    """
+    # totais ponderados
+    w_sum = 0.0
+    gf_w = ga_w = 0.0
 
-    for fx in fixtures_ft:
+    w_sum_home = 0.0
+    gf_home_w = ga_home_w = 0.0
+
+    w_sum_away = 0.0
+    gf_away_w = ga_away_w = 0.0
+
+    n = 0
+    for i, fx in enumerate(fixtures_ft):
         try:
-            home_id = fx["teams"]["home"]["id"]
-            away_id = fx["teams"]["away"]["id"]
-            goals_home = fx["goals"]["home"]
-            goals_away = fx["goals"]["away"]
-            # AllSports pode não ter gols históricos nessa normalização -> tenta raw
-            if goals_home is None or goals_away is None:
-                raw = fx.get("_raw") or {}
-                # tenta resultados no raw (padrões comuns)
-                # se não existir, ignora
+            home_id = int(fx["teams"]["home"]["id"])
+            away_id = int(fx["teams"]["away"]["id"])
+            gh = fx.get("goals", {}).get("home")
+            ga = fx.get("goals", {}).get("away")
+            if gh is None or ga is None:
                 continue
 
+            # peso por recência (mais recente = i=0 -> 1.0)
+            w = decay ** i
+
             if team_id == home_id:
-                _gf, _ga = int(goals_home), int(goals_away)
-                gf_home += _gf
-                ga_home += _ga
-                n_home += 1
+                _gf, _ga = int(gh), int(ga)
+                gf_home_w += w * _gf
+                ga_home_w += w * _ga
+                w_sum_home += w
             elif team_id == away_id:
-                _gf, _ga = int(goals_away), int(goals_home)
-                gf_away += _gf
-                ga_away += _ga
-                n_away += 1
+                _gf, _ga = int(ga), int(gh)  # invertendo perspectiva do time
+                gf_away_w += w * _gf
+                ga_away_w += w * _ga
+                w_sum_away += w
             else:
                 continue
 
-            gf += _gf
-            ga += _ga
+            gf_w += w * _gf
+            ga_w += w * _ga
+            w_sum += w
             n += 1
         except Exception:
             continue
 
-    if n == 0:
+    if n == 0 or w_sum <= 0:
         return 0, 0.0, 0.0, -1.0, -1.0, -1.0, -1.0
 
-    gf_pg = gf / n
-    ga_pg = ga / n
-    gf_home_pg = (gf_home / n_home) if n_home > 0 else -1.0
-    ga_home_pg = (ga_home / n_home) if n_home > 0 else -1.0
-    gf_away_pg = (gf_away / n_away) if n_away > 0 else -1.0
-    ga_away_pg = (ga_away / n_away) if n_away > 0 else -1.0
+    gf_pg = gf_w / w_sum
+    ga_pg = ga_w / w_sum
+
+    gf_home_pg = (gf_home_w / w_sum_home) if w_sum_home > 0 else -1.0
+    ga_home_pg = (ga_home_w / w_sum_home) if w_sum_home > 0 else -1.0
+
+    gf_away_pg = (gf_away_w / w_sum_away) if w_sum_away > 0 else -1.0
+    ga_away_pg = (ga_away_w / w_sum_away) if w_sum_away > 0 else -1.0
 
     return n, gf_pg, ga_pg, gf_home_pg, ga_home_pg, gf_away_pg, ga_away_pg
 
@@ -413,8 +494,11 @@ def build_picks_for_market(
 
             home_last = get_last_team_fixtures(home_id, last=last_n_form, status="FT")
             away_last = get_last_team_fixtures(away_id, last=last_n_form, status="FT")
-            home_form = compute_team_form(home_id, home_last)
-            away_form = compute_team_form(away_id, away_last)
+
+            # ✅ usando forma ponderada
+            home_form = compute_team_form_weighted(home_id, home_last, decay=0.85)
+            away_form = compute_team_form_weighted(away_id, away_last, decay=0.85)
+
             lam_h, lam_a, ev = estimate_lambdas(home_form, away_form, home_adv=home_adv)
 
             odds_row = get_odds_for_fixture(fixture_id)
@@ -612,7 +696,6 @@ def build_top_tips(
     pbar.progress(100)
     ptxt.markdown("<div class='ptext'>A selecionar Top Tips...</div>", unsafe_allow_html=True)
 
-    # rank por edge e prob
     ev_rank = {"ALTA": 2, "MÉDIA": 1, "BAIXA": 0}
     all_candidates = sorted(
         all_candidates,
@@ -623,7 +706,6 @@ def build_top_tips(
         ),
     )
 
-    # 1 tip por liga
     final: List[Dict] = []
     used_leagues = set()
     for c in all_candidates:
@@ -687,7 +769,6 @@ def main():
 
         debug = st.checkbox("Mostrar diagnóstico (debug)", value=False)
 
-    # Fixtures hoje (futuros)
     date_to_use = now_local.date()
     date_str = date_to_use.strftime("%Y-%m-%d")
     fixtures_raw = get_fixtures_by_date(date_str)
@@ -707,6 +788,9 @@ def main():
             st.write("Agora (local):", now_local.isoformat())
             st.write("Fixtures brutos:", len(fixtures_raw))
             st.write("Fixtures após filtro:", len(fixtures))
+            if fixtures_raw:
+                st.write("Exemplo FT raw keys:", list((fixtures_raw[0].get("_raw") or {}).keys())[:20])
+                st.write("Exemplo placar raw:", (fixtures_raw[0].get("_raw") or {}).get("event_final_result"))
 
     if not fixtures:
         st.error("Nenhum jogo encontrado (ou odds indisponíveis).")
@@ -735,7 +819,6 @@ def main():
                 top_n=top_tips_n,
             )
             st.session_state["toptips"] = tips
-
         render_picks(st.session_state.get("toptips", []))
 
     # ===== Outras abas =====
