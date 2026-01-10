@@ -8,11 +8,11 @@ import streamlit as st
 from openai import OpenAI
 
 # ============================================================
-# SECRETS (Streamlit Cloud -> Settings -> Secrets)
+# SECRETS (Streamlit Cloud -> Manage app -> Settings -> Secrets)
 # ============================================================
-# ALLSPORTS_API_KEY = "SUA_CHAVE_AQUI"
-# FOOTBALL_API_MODE = "allsports"   # manter assim para este app
-# OPENAI_API_KEY    = "SUA_CHAVE_OPENAI_AQUI"
+# FOOTBALL_API_MODE = "allsports"
+# ALLSPORTS_API_KEY = "SUA_CHAVE_ALLSPORTS"
+# OPENAI_API_KEY    = "SUA_CHAVE_OPENAI"   # (opcional, só se quiser IA)
 # ============================================================
 
 # =============================
@@ -20,8 +20,6 @@ from openai import OpenAI
 # =============================
 LOCAL_TZ = pytz.timezone("Africa/Maputo")
 MAX_LEAGUES_DEFAULT = 20
-
-# AllSportsAPI
 ALLSPORTS_BASE = "https://apiv2.allsportsapi.com/football/"
 
 st.set_page_config(page_title="Melhores Palpites do Dia", layout="wide")
@@ -36,7 +34,6 @@ st.markdown(
 .badge { background-color: #00ff00; color: black; padding: 4px 10px; border-radius: 14px;
          font-weight: 700; display:inline-block; }
 
-/* ===== Barcelona header ===== */
 .barca-header {
   background: linear-gradient(135deg, #004d98, #a50044);
   border-radius: 16px;
@@ -58,9 +55,10 @@ st.markdown(
   background: #25D366; color: #000; font-weight: 900; text-decoration: none;
 }
 .barca-wa:hover { background:#1ebe5d; }
+
 .ptext { color: #cfd8e3; font-size: 0.90rem; margin-top: 6px; }
 .ai-box { border-left: 4px solid #ffd166; padding-left: 10px; margin-top: 8px; color: #f3f4f6; }
-.small { font-size: 0.88rem; color: #cfd8e3; }
+.small { font-size: 0.88rem; color: #cfd8e3; margin-top: 6px; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -75,23 +73,26 @@ def _get_secret(name: str, default: Optional[str] = None) -> str:
         raise RuntimeError(f"Missing secret: {name}")
     return str(v)
 
+
 def provider_mode() -> str:
     return str(st.secrets.get("FOOTBALL_API_MODE", "allsports")).lower().strip()
+
 
 # =============================
 # OpenAI (Passo 3)
 # =============================
 @st.cache_resource
 def get_openai_client() -> OpenAI:
-    # Só inicializa se a chave existir
     key = st.secrets.get("OPENAI_API_KEY")
     if not key:
         raise RuntimeError("Missing secret: OPENAI_API_KEY")
     return OpenAI(api_key=str(key))
 
-def _short(s: str, n: int = 600) -> str:
+
+def _short(s: str, n: int = 700) -> str:
     s = (s or "").strip()
     return s if len(s) <= n else s[: n - 3] + "..."
+
 
 @st.cache_data(ttl=60 * 60 * 24)
 def ai_explain_pick_cached(
@@ -108,9 +109,6 @@ def ai_explain_pick_cached(
     lam_h: float,
     lam_a: float,
 ) -> str:
-    """
-    Cache por 24h para reduzir custo. A chave do cache é o conjunto de argumentos.
-    """
     client = get_openai_client()
 
     edge_txt = "n/a" if edge is None else f"{edge*100:.1f}%"
@@ -134,8 +132,8 @@ Modelo:
 - Odd mercado: {odd:.2f}
 - Odd justa: {fair:.2f}
 - Edge: {edge_txt}
-- Evidência (quantidade/qualidade de jogos FT usados): {ev}
-- Lambdas estimados: λ_home={lam_h:.2f}, λ_away={lam_a:.2f}
+- Evidência: {ev}
+- Lambdas: λ_home={lam_h:.2f}, λ_away={lam_a:.2f}
 """
 
     try:
@@ -152,6 +150,7 @@ Modelo:
     except Exception:
         return "IA indisponível no momento para este pick."
 
+
 # =============================
 # AllSportsAPI low-level
 # =============================
@@ -167,6 +166,7 @@ def allsports_get(met: str, params: Dict[str, str], timeout: int = 15) -> Dict:
     except Exception as e:
         return {"success": 0, "result": None, "errors": str(e)}
 
+
 # =============================
 # Normalização (AllSports -> estrutura do app)
 # =============================
@@ -178,6 +178,7 @@ def _as_int(x) -> Optional[int]:
     except Exception:
         return None
 
+
 def _parse_allsports_dt_local(ev: Dict) -> Optional[datetime]:
     try:
         d = ev.get("event_date")
@@ -187,19 +188,13 @@ def _parse_allsports_dt_local(ev: Dict) -> Optional[datetime]:
     except Exception:
         return None
 
+
 def _parse_score_pair(s: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
-    """
-    Lê placar do AllSports:
-      - "2 - 1", "2-1", "2 : 1"
-    Ignora valores vazios como "-" ou "".
-    """
     if not s:
         return None, None
-
     txt = str(s).strip()
     if txt in ("-", "—", "–", ""):
         return None, None
-
     for sep in [" - ", "-", " : ", ":", "–", "—"]:
         if sep in txt:
             parts = [p.strip() for p in txt.split(sep)]
@@ -210,14 +205,8 @@ def _parse_score_pair(s: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
                     return h, a
     return None, None
 
+
 def _extract_ft_goals_from_raw(ev: Dict) -> Tuple[Optional[int], Optional[int]]:
-    """
-    Prioridade (melhor para FT):
-      1) event_ft_result
-      2) event_final_result
-      3) outros
-      4) campos separados
-    """
     for key in ["event_ft_result", "event_final_result", "event_result", "final_result", "ft_result"]:
         h, a = _parse_score_pair(ev.get(key))
         if h is not None and a is not None:
@@ -234,6 +223,7 @@ def _extract_ft_goals_from_raw(ev: Dict) -> Tuple[Optional[int], Optional[int]]:
             return h, a
 
     return None, None
+
 
 def _normalize_fixture_allsports(ev: Dict) -> Optional[Dict]:
     try:
@@ -270,6 +260,7 @@ def _normalize_fixture_allsports(ev: Dict) -> Optional[Dict]:
     except Exception:
         return None
 
+
 # =============================
 # Data access (AllSports)
 # =============================
@@ -287,6 +278,7 @@ def get_fixtures_by_date(date_yyyy_mm_dd: str) -> List[Dict]:
         if fx:
             out.append(fx)
     return out
+
 
 @st.cache_data(ttl=60 * 60 * 2)
 def get_last_team_fixtures(team_id: int, last: int = 10, status: str = "FT") -> List[Dict]:
@@ -327,6 +319,7 @@ def get_last_team_fixtures(team_id: int, last: int = 10, status: str = "FT") -> 
     norm.sort(key=_dt_key, reverse=True)
     return norm[:last]
 
+
 @st.cache_data(ttl=60 * 10)
 def get_odds_for_fixture(fixture_id: int) -> Dict:
     if provider_mode() != "allsports":
@@ -339,6 +332,7 @@ def get_odds_for_fixture(fixture_id: int) -> Dict:
     if not row_list:
         return {}
     return row_list[0] if isinstance(row_list, list) and row_list else {}
+
 
 # =============================
 # Time parsing
@@ -353,9 +347,11 @@ def parse_fixture_time_local(fx: Dict) -> Optional[datetime]:
     except Exception:
         return None
 
+
 def is_future_fixture(fx: Dict, now_local: datetime) -> bool:
     dt = parse_fixture_time_local(fx)
     return bool(dt and dt > now_local)
+
 
 # =============================
 # Poisson Model
@@ -363,7 +359,8 @@ def is_future_fixture(fx: Dict, now_local: datetime) -> bool:
 def poisson_pmf(k: int, lam: float) -> float:
     if lam <= 0:
         return 0.0
-    return math.exp(-lam) * (lam ** k) / math.factorial(k)
+    return math.exp(-lam) * (lam**k) / math.factorial(k)
+
 
 def prob_over_total(lam_home: float, lam_away: float, line: float, max_goals: int = 10) -> float:
     threshold = math.floor(line)
@@ -376,10 +373,12 @@ def prob_over_total(lam_home: float, lam_away: float, line: float, max_goals: in
                 p_le += ph * pa
     return max(0.0, min(1.0, 1.0 - p_le))
 
+
 def prob_btts(lam_home: float, lam_away: float) -> float:
     p_home0 = poisson_pmf(0, lam_home)
     p_away0 = poisson_pmf(0, lam_away)
     return max(0.0, min(1.0, 1.0 - p_home0 - p_away0 + (p_home0 * p_away0)))
+
 
 def prob_1x2(lam_home: float, lam_away: float, max_goals: int = 10) -> Tuple[float, float, float]:
     pH = pD = pA = 0.0
@@ -398,13 +397,16 @@ def prob_1x2(lam_home: float, lam_away: float, max_goals: int = 10) -> Tuple[flo
         pH, pD, pA = pH / s, pD / s, pA / s
     return pH, pD, pA
 
+
 def fair_odds(p: float) -> Optional[float]:
     if p <= 0:
         return None
     return 1.0 / p
 
+
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
+
 
 # =============================
 # Forma ponderada por recência
@@ -433,7 +435,7 @@ def compute_team_form_weighted(
             if gh is None or ga is None:
                 continue
 
-            w = decay ** i
+            w = decay**i
 
             if team_id == home_id:
                 _gf, _ga = int(gh), int(ga)
@@ -469,6 +471,7 @@ def compute_team_form_weighted(
 
     return n, gf_pg, ga_pg, gf_home_pg, ga_home_pg, gf_away_pg, ga_away_pg
 
+
 def estimate_lambdas(home_form, away_form, home_adv: float = 1.08) -> Tuple[float, float, str]:
     base = 1.25
     nH, gfH, gaH, gfH_home, gaH_home, gfH_away, gaH_away = home_form
@@ -499,6 +502,7 @@ def estimate_lambdas(home_form, away_form, home_adv: float = 1.08) -> Tuple[floa
 
     return clamp(lam_home, 0.2, 3.5), clamp(lam_away, 0.2, 3.5), ev
 
+
 # =============================
 # Odds mapping (AllSports)
 # =============================
@@ -513,6 +517,7 @@ def odds_allsports_market(odds_row: Dict, key: str) -> Optional[float]:
     except Exception:
         return None
 
+
 # =============================
 # League limiting
 # =============================
@@ -523,12 +528,50 @@ def limit_to_top_leagues(fixtures: List[Dict], max_leagues: int) -> List[Dict]:
         if lid is None:
             continue
         league_counts[int(lid)] = league_counts.get(int(lid), 0) + 1
+
     top_ids = [lid for lid, _ in sorted(league_counts.items(), key=lambda x: x[1], reverse=True)[:max_leagues]]
     top_set = set(top_ids)
     return [fx for fx in fixtures if int(fx.get("league", {}).get("id", -1)) in top_set]
 
+
 # =============================
-# Picks per market
+# PASSO 4 — TOP TIPS SCORE (melhor ranking)
+# =============================
+def _ev_weight(ev: str) -> float:
+    ev = (ev or "").upper().strip()
+    if ev == "ALTA":
+        return 1.0
+    if ev == "MÉDIA":
+        return 0.6
+    return 0.25
+
+
+def _odd_penalty(odd: float, zebra_threshold: float = 4.0) -> float:
+    if odd is None:
+        return 0.2
+    if odd <= zebra_threshold:
+        return 0.0
+    return min(0.40, (odd - zebra_threshold) / 20.0)
+
+
+def top_tip_score(p: Dict, zebra_threshold: float = 4.0) -> float:
+    edge = p.get("edge")
+    prob = float(p.get("prob") or 0.0)
+    odd = float(p.get("odd") or 0.0)
+    ev = p.get("ev", "BAIXA")
+
+    edge_val = float(edge) if edge is not None else 0.0
+    ev_w = _ev_weight(ev)
+    penalty = _odd_penalty(odd, zebra_threshold=zebra_threshold)
+
+    # pesos: edge principal, prob reforça estabilidade, evidência reforça confiança,
+    # penaliza odds muito altas para Top Tips não virar só zebras.
+    score = (1.8 * edge_val) + (0.9 * prob) + (0.5 * ev_w) - (1.0 * penalty)
+    return score
+
+
+# =============================
+# Picks per market (com progress callback)
 # =============================
 def build_picks_for_market(
     fixtures: List[Dict],
@@ -539,19 +582,16 @@ def build_picks_for_market(
     min_odd: float,
     zebra_min_odd: float,
     max_picks: int,
+    progress_cb=None,
 ) -> List[Dict]:
     picks: List[Dict] = []
     used_leagues = set()
 
-    show_progress = bool(st.session_state.get("_show_progress", False))
-    pbar = st.progress(0) if show_progress else None
-    ptxt = st.empty() if show_progress else None
     total = max(1, len(fixtures))
 
     for idx, fx in enumerate(fixtures, start=1):
-        if show_progress and pbar is not None and ptxt is not None:
-            pbar.progress(min(100, int(idx * 100 / total)))
-            ptxt.markdown(f"<div class='ptext'>A analisar {idx}/{total} jogos...</div>", unsafe_allow_html=True)
+        if progress_cb:
+            progress_cb(idx, total)
 
         try:
             fixture_id = int(fx["fixture"]["id"])
@@ -581,21 +621,23 @@ def build_picks_for_market(
             def push(pick_name: str, prob: float, odd: float):
                 fo = fair_odds(prob) or 0.0
                 edge = (odd / fo) - 1.0 if fo > 0 else None
-                picks.append({
-                    "league_id": league_id,
-                    "league": league_name,
-                    "time": time_str,
-                    "match": match_name,
-                    "pick": pick_name,
-                    "prob": prob,
-                    "odd": odd,
-                    "fair": fo,
-                    "edge": edge,
-                    "ev": ev,
-                    "lam": (lam_h, lam_a),
-                    "fixture_id": fixture_id,
-                    "market": market,
-                })
+                picks.append(
+                    {
+                        "league_id": league_id,
+                        "league": league_name,
+                        "time": time_str,
+                        "match": match_name,
+                        "pick": pick_name,
+                        "prob": prob,
+                        "odd": odd,
+                        "fair": fo,
+                        "edge": edge,
+                        "ev": ev,
+                        "lam": (lam_h, lam_a),
+                        "fixture_id": fixture_id,
+                        "market": market,
+                    }
+                )
                 used_leagues.add(league_id)
 
             if market == "Over 1.5":
@@ -659,7 +701,11 @@ def build_picks_for_market(
                 odd_x2 = odds_allsports_market(odds_row, "odd_x2")
                 odd_12 = odds_allsports_market(odds_row, "odd_12")
 
-                for dc_name, p_dc, odd_dc in [("1X", p_1x, odd_1x), ("X2", p_x2, odd_x2), ("12", p_12, odd_12)]:
+                for dc_name, p_dc, odd_dc in [
+                    ("1X", p_1x, odd_1x),
+                    ("X2", p_x2, odd_x2),
+                    ("12", p_12, odd_12),
+                ]:
                     if not odd_dc or odd_dc < min_odd:
                         continue
                     p_combo = clamp(p_dc * p_over, 0.0, 1.0)
@@ -709,12 +755,12 @@ def build_picks_for_market(
 
     return picks
 
+
 def render_picks(picks: List[Dict], ai_enabled: bool, ai_max: int):
     if not picks:
         st.info("Sem picks que passem nos filtros (ou odds indisponíveis).")
         return
 
-    # limita quantas explicações de IA por aba (para custo/performance)
     ai_count = 0
 
     for p in picks:
@@ -757,10 +803,14 @@ def render_picks(picks: List[Dict], ai_enabled: bool, ai_max: int):
                     st.markdown(f"<div class='ai-box'>{txt}</div>", unsafe_allow_html=True)
                 ai_count += 1
             else:
-                st.markdown("<div class='small'>IA: limite de explicações desta aba atingido (para economizar). Ajuste no sidebar.</div>", unsafe_allow_html=True)
+                st.markdown(
+                    "<div class='small'>IA: limite de explicações desta aba atingido (para economizar). Ajuste no sidebar.</div>",
+                    unsafe_allow_html=True,
+                )
+
 
 # =============================
-# TOP TIPS (6-10 juntos)
+# TOP TIPS (6-10 juntos) — PASSO 4 aplicado
 # =============================
 def build_top_tips(
     fixtures: List[Dict],
@@ -789,23 +839,21 @@ def build_top_tips(
             min_odd=min_odd,
             zebra_min_odd=zebra_min_odd,
             max_picks=30,
+            progress_cb=None,
         )
         all_candidates.extend(cand)
 
     pbar.progress(100)
     ptxt.markdown("<div class='ptext'>A selecionar Top Tips...</div>", unsafe_allow_html=True)
 
-    ev_rank = {"ALTA": 2, "MÉDIA": 1, "BAIXA": 0}
+    # PASSO 4: ordena por score (melhor que só edge/prob)
     all_candidates = sorted(
         all_candidates,
-        key=lambda x: (
-            -999 if x.get("edge") is None else -x["edge"],
-            -x.get("prob", 0.0),
-            -ev_rank.get(x.get("ev", "BAIXA"), 0),
-        ),
+        key=lambda p: top_tip_score(p, zebra_threshold=zebra_min_odd),
+        reverse=True,
     )
 
-    # 1 tip por liga
+    # 1 pick por liga (diversidade)
     final: List[Dict] = []
     used_leagues = set()
     for c in all_candidates:
@@ -819,6 +867,7 @@ def build_top_tips(
 
     ptxt.markdown("<div class='ptext'>Concluído.</div>", unsafe_allow_html=True)
     return final
+
 
 # =============================
 # MAIN
@@ -855,6 +904,9 @@ def main():
         st.subheader("Configuração")
         auto_tomorrow_if_empty = st.checkbox("Se hoje não tiver jogos futuros, usar amanhã", value=True)
 
+        # Pool 50–150 (performance)
+        pool_size = st.slider("Pool de jogos para análise", 50, 150, 100, 10)
+
         top_tips_n = st.slider("Top Tips (6–10)", 6, 10, 8, 1)
 
         max_picks = st.slider("Top picks por aba", 5, 20, 10, 1)
@@ -868,16 +920,18 @@ def main():
         zebra_min_odd = st.number_input("Odd mínima (zebras)", value=4.00, min_value=2.00, step=0.10)
 
         st.divider()
-        st.subheader("IA (Passo 3)")
+        st.subheader("IA")
         ai_enabled = st.checkbox("Ativar IA para explicar picks", value=True)
         ai_max = st.slider("Máx. explicações por aba", 1, 10, 5, 1)
-        ai_warn = ""
+
+        ai_ok = True
         if ai_enabled and not st.secrets.get("OPENAI_API_KEY"):
-            ai_warn = "IA ativada, mas falta OPENAI_API_KEY nos Secrets."
-            st.warning(ai_warn)
+            ai_ok = False
+            st.warning("IA ativada, mas falta OPENAI_API_KEY nos Secrets.")
 
         debug = st.checkbox("Mostrar diagnóstico (debug)", value=False)
 
+    # Fixtures hoje (futuros)
     date_to_use = now_local.date()
     date_str = date_to_use.strftime("%Y-%m-%d")
     fixtures_raw = get_fixtures_by_date(date_str)
@@ -890,47 +944,35 @@ def main():
         fixtures_raw = get_fixtures_by_date(date_str)
         fixtures = [fx for fx in fixtures_raw if parse_fixture_time_local(fx) is not None]
 
+    if not fixtures:
+        st.error("Nenhum jogo encontrado (ou odds indisponíveis).")
+        return
+
+    # Limita ligas
+    fixtures = limit_to_top_leagues(fixtures, max_leagues=max_leagues)
+
+    # Ordena por hora e limita pool (50–150)
+    fixtures = sorted(fixtures, key=lambda fx: parse_fixture_time_local(fx) or datetime.max)
+    fixtures = fixtures[:pool_size]
+
     if debug:
         with st.expander("Diagnóstico (fixtures/tempo)"):
             st.write("Provider:", provider_mode())
             st.write("Data usada:", date_str)
             st.write("Agora (local):", now_local.isoformat())
             st.write("Fixtures brutos:", len(fixtures_raw))
-            st.write("Fixtures após filtro:", len(fixtures))
-            if fixtures_raw:
-                st.write("Exemplo placar raw (dia):", (fixtures_raw[0].get("_raw") or {}).get("event_final_result"))
-
-            # Debug do histórico FT (o que interessa)
-            if fixtures:
-                fx0 = fixtures[0]
-                hid = fx0["teams"]["home"]["id"]
-                last_ft = get_last_team_fixtures(hid, last=5, status="FT")
-                st.write("Exemplo histórico FT (5 jogos) placares:")
-                for j in last_ft:
-                    raw = j.get("_raw") or {}
-                    st.write({
-                        "date": raw.get("event_date"),
-                        "home": raw.get("event_home_team"),
-                        "away": raw.get("event_away_team"),
-                        "ft": raw.get("event_ft_result"),
-                        "final": raw.get("event_final_result"),
-                        "norm_goals": j.get("goals"),
-                        "status": (j.get("fixture", {}).get("status", {}) or {}).get("short"),
-                    })
-
-    if not fixtures:
-        st.error("Nenhum jogo encontrado (ou odds indisponíveis).")
-        return
-
-    fixtures = limit_to_top_leagues(fixtures, max_leagues=max_leagues)
+            st.write("Fixtures futuros (antes do limite de ligas):", len([fx for fx in fixtures_raw if is_future_fixture(fx, now_local)]))
+            st.write("Pool final (após limite ligas + corte):", len(fixtures))
 
     st.markdown(
         f"🗓️ Data analisada: <span class='badge'>{date_to_use.strftime('%d/%m/%Y')}</span>",
         unsafe_allow_html=True,
     )
-    st.caption(f"Jogos carregados (após limite de ligas): {len(fixtures)} | Máx. ligas: {max_leagues}")
+    st.caption(f"Pool final: {len(fixtures)} jogos | Máx. ligas: {max_leagues}")
 
-    tabs = st.tabs(["⭐ Top Tips", "🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "👥 DC+O1.5", "👥 DC+O2.5", "🟣 Zebras"])
+    tabs = st.tabs(
+        ["⭐ Top Tips", "🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "👥 DC+O1.5", "👥 DC+O2.5", "🟣 Zebras"]
+    )
 
     # ===== Top Tips =====
     with tabs[0]:
@@ -946,7 +988,7 @@ def main():
             )
             st.session_state["toptips"] = tips
 
-        render_picks(st.session_state.get("toptips", []), ai_enabled=ai_enabled and not bool(ai_warn), ai_max=ai_max)
+        render_picks(st.session_state.get("toptips", []), ai_enabled=ai_enabled and ai_ok, ai_max=ai_max)
 
     # ===== Outras abas =====
     markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5", "Zebras"]
@@ -954,9 +996,17 @@ def main():
         with tab:
             st.subheader(f"Mercado: {market}")
             col1, col2 = st.columns([1, 2])
+
             with col1:
                 if st.button(f"🚀 Gerar Top {max_picks}", key=f"btn_{market}"):
-                    st.session_state["_show_progress"] = True
+                    pbar = st.progress(0)
+                    ptxt = st.empty()
+
+                    def cb(i, tot):
+                        pct = int(i * 100 / max(1, tot))
+                        pbar.progress(min(100, pct))
+                        ptxt.markdown(f"<div class='ptext'>A analisar {i}/{tot} jogos...</div>", unsafe_allow_html=True)
+
                     try:
                         picks = build_picks_for_market(
                             fixtures=fixtures,
@@ -967,14 +1017,19 @@ def main():
                             min_odd=min_odd,
                             zebra_min_odd=zebra_min_odd,
                             max_picks=max_picks,
+                            progress_cb=cb,
                         )
                         st.session_state[f"picks_{market}"] = picks
-                    finally:
-                        st.session_state["_show_progress"] = False
-            with col2:
-                st.write("Critérios: odds mínimas + ranking por edge. Se não aparecer pick, pode faltar odds no AllSports.")
+                        pbar.progress(100)
+                        ptxt.markdown("<div class='ptext'>Concluído.</div>", unsafe_allow_html=True)
+                    except Exception as e:
+                        ptxt.markdown(f"<div class='ptext'>Falha: {e}</div>", unsafe_allow_html=True)
 
-            render_picks(st.session_state.get(f"picks_{market}", []), ai_enabled=ai_enabled and not bool(ai_warn), ai_max=ai_max)
+            with col2:
+                st.write("Critérios: odds mínimas + ranking por edge. Top Tips usa score avançado (Passo 4).")
+
+            render_picks(st.session_state.get(f"picks_{market}", []), ai_enabled=ai_enabled and ai_ok, ai_max=ai_max)
+
 
 if __name__ == "__main__":
     main()
