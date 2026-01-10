@@ -1,6 +1,4 @@
 import math
-import re
-import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -9,188 +7,124 @@ import requests
 import streamlit as st
 
 # =============================
-# OPTIONAL: clock refresh
-# =============================
-try:
-    from streamlit_autorefresh import st_autorefresh
-    HAS_AUTOREFRESH = True
-except Exception:
-    HAS_AUTOREFRESH = False
-
-# =============================
-# OPENAI
-# =============================
-try:
-    from openai import OpenAI
-    HAS_OPENAI = True
-except Exception:
-    HAS_OPENAI = False
-
-# =============================
 # CONFIG
 # =============================
 LOCAL_TZ = pytz.timezone("Africa/Maputo")
-LOCAL_TZ_NAME = "Africa/Maputo"
-API_SPORTS_BASE = "https://v3.football.api-sports.io"
+API_BASE = "https://v3.football.api-sports.io"
+MAX_LEAGUES_DEFAULT = 20
 
-st.set_page_config(page_title="Melhores Palpites do Dia", layout="wide")
+st.set_page_config(page_title="Elite Scanner 4.1", layout="wide")
 
-# =============================
-# Session
-# =============================
-if "pause_refresh" not in st.session_state:
-    st.session_state["pause_refresh"] = False
-if "rows_1x2" not in st.session_state:
-    st.session_state["rows_1x2"] = []
-
-# =============================
-# CSS
-# =============================
 st.markdown(
     """
 <style>
-.main { background-color: #0b0f17; }
-.block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
-.hero {
-  border-radius: 16px; padding: 18px 18px;
-  background: linear-gradient(135deg, rgba(0,255,0,0.14), rgba(15,22,35,0.95));
-  border: 1px solid rgba(0,255,0,0.22);
-  box-shadow: 0 10px 30px rgba(0,0,0,0.30);
-  margin-bottom: 16px;
-}
-.hero-title { font-size: 1.35rem; font-weight: 800; color: #eaffea; margin: 0; }
-.hero-sub { margin-top: 8px; color: #cdd6e0; font-size: 0.95rem; }
-.pills { margin-top: 10px; display:flex; gap:8px; flex-wrap: wrap; align-items:center; }
-.pill {
-  background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.10);
-  color: #e9eef7; border-radius: 999px; padding: 6px 10px; font-size: 0.85rem;
-}
-.brand { background: rgba(0,255,0,0.12); border: 1px solid rgba(0,255,0,0.22); color: #d7ffd7; }
-.card {
-  background-color: #141a27; padding: 14px; border-radius: 14px;
-  border: 1px solid rgba(255,255,255,0.08);
-  box-shadow: 0 8px 22px rgba(0,0,0,0.28);
-  margin-bottom: 10px;
-}
-.card-left { border-left: 6px solid #00ff00; }
-.meta { color: #aab6c5; font-size: 0.88rem; }
-.pickline { margin-top: 8px; font-size: 1.02rem; }
-.kpi { display:flex; gap:10px; flex-wrap: wrap; margin-top: 10px; }
-.kpi span {
-  background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
-  padding: 6px 10px; border-radius: 10px; font-size: 0.88rem; color: #e8eef7;
-}
-a.whatsapp {
-  display:inline-block; text-decoration:none; font-weight: 800; padding: 10px 14px;
-  border-radius: 12px; border: 1px solid rgba(0,255,0,0.35);
-  background: rgba(0,255,0,0.16); color: #eaffea;
-}
-a.whatsapp:hover { background: rgba(0,255,0,0.24); }
-.smallnote { color:#aab6c5; font-size: 0.85rem; margin-top: 6px; }
+.main { background-color: #0e1117; }
+.card { background-color: #1a1c24; padding: 14px; border-radius: 12px;
+        border-left: 7px solid #00ff00; color: white; margin-bottom: 10px; }
+.muted { color: #aab; font-size: 0.90rem; }
+.badge { background-color: #00ff00; color: black; padding: 4px 10px; border-radius: 14px;
+         font-weight: 700; display:inline-block; }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
 # =============================
-# Secrets helpers
+# API Helpers
 # =============================
-def _sec_required(name: str) -> str:
-    v = st.secrets.get(name)
-    if v is None or str(v).strip() == "":
-        raise RuntimeError(f"Missing secret: {name}")
-    return str(v).strip()
-
-def _sec_optional(name: str, default: str = "") -> str:
+def _get_secret(name: str, default: Optional[str] = None) -> str:
     v = st.secrets.get(name, default)
-    return str(v).strip() if v is not None else default
+    if v is None:
+        raise RuntimeError(f"Missing secret: {name}")
+    return str(v)
 
-def has_secret(name: str) -> bool:
-    v = st.secrets.get(name)
-    return v is not None and str(v).strip() != ""
 
-# =============================
-# Utils
-# =============================
-def parse_iso_local(iso: str) -> Optional[datetime]:
+def _football_headers() -> Dict[str, str]:
+    api_key = _get_secret("FOOTBALL_API_KEY")
+    mode = st.secrets.get("FOOTBALL_API_MODE", "apisports").lower().strip()
+    if mode == "rapidapi":
+        host = st.secrets.get("FOOTBALL_RAPIDAPI_HOST", "v3.football.api-sports.io")
+        return {"x-rapidapi-key": api_key, "x-rapidapi-host": host}
+    return {"x-apisports-key": api_key}
+
+
+def api_get(path: str, params: Dict[str, str], timeout: int = 12) -> Dict:
     try:
+        r = requests.get(f"{API_BASE}{path}", headers=_football_headers(), params=params, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {"response": [], "errors": {"request": str(e)}}
+
+
+@st.cache_data(ttl=60 * 10)
+def get_fixtures_by_date(date_yyyy_mm_dd: str) -> List[Dict]:
+    data = api_get("/fixtures", {"date": date_yyyy_mm_dd})
+    return data.get("response", []) or []
+
+
+@st.cache_data(ttl=60 * 60 * 2)
+def get_last_team_fixtures(team_id: int, last: int = 10, status: str = "FT") -> List[Dict]:
+    data = api_get("/fixtures", {"team": str(team_id), "last": str(last), "status": status})
+    return data.get("response", []) or []
+
+
+@st.cache_data(ttl=60 * 10)
+def get_odds_for_fixture(fixture_id: int, bookmaker: int = 8) -> List[Dict]:
+    data = api_get("/odds", {"fixture": str(fixture_id), "bookmaker": str(bookmaker)})
+    return data.get("response", []) or []
+
+
+# =============================
+# Time parsing
+# =============================
+def parse_fixture_time_local(fx: Dict) -> Optional[datetime]:
+    try:
+        iso = fx["fixture"]["date"]
         dt_utc = datetime.fromisoformat(iso.replace("Z", "+00:00"))
         return dt_utc.astimezone(LOCAL_TZ)
     except Exception:
         return None
 
-def norm_text(s: str) -> str:
-    s = (s or "").lower().strip()
-    s = re.sub(r"\s+", " ", s)
-    return s
+
+def is_future_fixture(fx: Dict, now_local: datetime) -> bool:
+    dt = parse_fixture_time_local(fx)
+    return bool(dt and dt > now_local)
+
 
 # =============================
-# API-SPORTS
-# =============================
-def apisports_headers() -> Dict[str, str]:
-    return {"x-apisports-key": _sec_required("APISPORTS_KEY")}
-
-def apisports_get(path: str, params: Dict[str, str], timeout: int = 18) -> Dict:
-    r = requests.get(f"{API_SPORTS_BASE}{path}", headers=apisports_headers(), params=params, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
-
-@st.cache_data(ttl=60 * 30)
-def apisports_leagues_current() -> List[Dict]:
-    # Lista ligas atuais para resolver IDs por nome (sem hardcode)
-    data = apisports_get("/leagues", {"current": "true"})
-    return data.get("response", []) or []
-
-@st.cache_data(ttl=60 * 10)
-def apisports_fixtures_by_date(date_yyyy_mm_dd: str) -> Dict:
-    # timezone Maputo ajuda a API a retornar datas corretamente
-    return apisports_get("/fixtures", {"date": date_yyyy_mm_dd, "timezone": LOCAL_TZ_NAME})
-
-@st.cache_data(ttl=60 * 10)
-def apisports_fixtures_window(from_yyyy_mm_dd: str, to_yyyy_mm_dd: str) -> Dict:
-    return apisports_get("/fixtures", {"from": from_yyyy_mm_dd, "to": to_yyyy_mm_dd, "timezone": LOCAL_TZ_NAME})
-
-@st.cache_data(ttl=60 * 60)
-def apisports_team_last(team_id: int, last: int = 10) -> List[Dict]:
-    data = apisports_get("/fixtures", {"team": str(team_id), "last": str(last), "status": "FT", "timezone": LOCAL_TZ_NAME})
-    return data.get("response", []) or []
-
-# Odds (API-SPORTS) – opcional, pode vir vazio no plano free
-@st.cache_data(ttl=60 * 10)
-def apisports_odds_fixture(fixture_id: int) -> List[Dict]:
-    data = apisports_get("/odds", {"fixture": str(fixture_id)})
-    return data.get("response", []) or []
-
-def apisports_extract_market(odds_resp: List[Dict], market_name: str, selection_value: str) -> Optional[float]:
-    if not odds_resp:
-        return None
-    try:
-        item = odds_resp[0]
-        for bk in item.get("bookmakers", []):
-            for bet in bk.get("bets", []):
-                if (bet.get("name") or "").strip().lower() == market_name.strip().lower():
-                    for v in bet.get("values", []):
-                        if (v.get("value") or "").strip().lower() == selection_value.strip().lower():
-                            odd = v.get("odd")
-                            return float(odd) if odd is not None else None
-    except Exception:
-        pass
-    return None
-
-# =============================
-# Model
+# Poisson Model
 # =============================
 def poisson_pmf(k: int, lam: float) -> float:
     if lam <= 0:
         return 0.0
     return math.exp(-lam) * (lam ** k) / math.factorial(k)
 
-def prob_1x2(lam_h: float, lam_a: float, max_goals: int = 10) -> Tuple[float, float, float]:
+
+def prob_over_total(lam_home: float, lam_away: float, line: float, max_goals: int = 10) -> float:
+    threshold = math.floor(line)
+    p_le = 0.0
+    for gh in range(max_goals + 1):
+        ph = poisson_pmf(gh, lam_home)
+        for ga in range(max_goals + 1):
+            pa = poisson_pmf(ga, lam_away)
+            if gh + ga <= threshold:
+                p_le += ph * pa
+    return max(0.0, min(1.0, 1.0 - p_le))
+
+
+def prob_btts(lam_home: float, lam_away: float) -> float:
+    p_home0 = poisson_pmf(0, lam_home)
+    p_away0 = poisson_pmf(0, lam_away)
+    return max(0.0, min(1.0, 1.0 - p_home0 - p_away0 + (p_home0 * p_away0)))
+
+
+def prob_1x2(lam_home: float, lam_away: float, max_goals: int = 10) -> Tuple[float, float, float]:
     pH = pD = pA = 0.0
     for gh in range(max_goals + 1):
-        ph = poisson_pmf(gh, lam_h)
+        ph = poisson_pmf(gh, lam_home)
         for ga in range(max_goals + 1):
-            pa = poisson_pmf(ga, lam_a)
+            pa = poisson_pmf(ga, lam_away)
             if gh > ga:
                 pH += ph * pa
             elif gh == ga:
@@ -202,11 +136,16 @@ def prob_1x2(lam_h: float, lam_a: float, max_goals: int = 10) -> Tuple[float, fl
         pH, pD, pA = pH / s, pD / s, pA / s
     return pH, pD, pA
 
+
 def fair_odds(p: float) -> Optional[float]:
-    return None if p <= 0 else 1.0 / p
+    if p <= 0:
+        return None
+    return 1.0 / p
+
 
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
+
 
 def compute_team_form(team_id: int, fixtures_ft: List[Dict]) -> Tuple[int, float, float, float, float, float, float]:
     gf = ga = 0
@@ -256,6 +195,7 @@ def compute_team_form(team_id: int, fixtures_ft: List[Dict]) -> Tuple[int, float
 
     return n, gf_pg, ga_pg, gf_home_pg, ga_home_pg, gf_away_pg, ga_away_pg
 
+
 def estimate_lambdas(home_form, away_form, home_adv: float = 1.08) -> Tuple[float, float, str]:
     base = 1.25
     nH, gfH, gaH, gfH_home, gaH_home, gfH_away, gaH_away = home_form
@@ -274,327 +214,339 @@ def estimate_lambdas(home_form, away_form, home_adv: float = 1.08) -> Tuple[floa
 
     n_eff = min(nH, nA)
     w = clamp(n_eff / 10.0, 0.25, 1.0)
-    lam_h = w * lam_home_raw + (1 - w) * base
-    lam_a = w * lam_away_raw + (1 - w) * base
+    lam_home = w * lam_home_raw + (1 - w) * base
+    lam_away = w * lam_away_raw + (1 - w) * base
 
-    ev = "ALTA" if n_eff >= 8 else ("MÉDIA" if n_eff >= 4 else "BAIXA")
-    return clamp(lam_h, 0.2, 3.5), clamp(lam_a, 0.2, 3.5), ev
+    if n_eff >= 8:
+        ev = "ALTA"
+    elif n_eff >= 4:
+        ev = "MÉDIA"
+    else:
+        ev = "BAIXA"
+
+    return clamp(lam_home, 0.2, 3.5), clamp(lam_away, 0.2, 3.5), ev
+
 
 # =============================
-# IA (optional)
+# Odds parsing (robusto por keywords)
 # =============================
-def openai_client() -> Optional["OpenAI"]:
-    if not HAS_OPENAI:
+def _extract_market_odds(odds_response: List[Dict], market_keywords: List[str], selection_keywords: List[str]) -> Optional[float]:
+    try:
+        if not odds_response:
+            return None
+        item = odds_response[0]
+        for bk in item.get("bookmakers", []):
+            for bet in bk.get("bets", []):
+                bet_name = (bet.get("name") or "").lower()
+                if all(k.lower() in bet_name for k in market_keywords):
+                    for v in bet.get("values", []):
+                        vname = (v.get("value") or "").lower()
+                        if all(sk.lower() in vname for sk in selection_keywords):
+                            odd = v.get("odd")
+                            if odd is None:
+                                continue
+                            return float(odd)
         return None
-    if not has_secret("OPENAI_API_KEY"):
+    except Exception:
         return None
-    return OpenAI(api_key=_sec_required("OPENAI_API_KEY"))
 
-@st.cache_data(ttl=60 * 60)
-def ai_explain(home: str, away: str, league: str, pick: str, prob: float, odd: Optional[float], ev: str) -> str:
-    c = openai_client()
-    if c is None:
-        return "IA indisponível (confira requirements: openai, e OPENAI_API_KEY nos secrets)."
-    odd_txt = f"{odd:.2f}" if odd is not None else "—"
-    prompt = f"""
-Explique este palpite em PT (máx 6 linhas), sem prometer ganhos.
-Jogo: {home} vs {away}
-Liga: {league}
-Pick: {pick}
-Prob: {prob:.3f}
-Odd: {odd_txt}
-Evidência: {ev}
-Inclua 2 razões quantitativas + 1 risco.
-"""
-    r = c.chat.completions.create(
-        model=_sec_optional("OPENAI_MODEL", "gpt-4o-mini"),
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.4,
-    )
-    return (r.choices[0].message.content or "").strip()
 
 # =============================
-# TOP leagues resolver (10 ligas)
+# Fixture filtering to MAX 20 leagues
 # =============================
-TOP_LEAGUE_PATTERNS = [
-    # Europa
-    ("Premier League", ["premier league", "england"]),
-    ("La Liga", ["la liga", "spain"]),
-    ("Serie A", ["serie a", "italy"]),
-    ("Bundesliga", ["bundesliga", "germany"]),
-    ("Ligue 1", ["ligue 1", "france"]),
-    ("UEFA Champions League", ["uefa champions league"]),
-    # Américas
-    ("Brasileirão Série A", ["serie a", "brazil"]),
-    ("Argentina Primera", ["primera division", "argentina"]),
-    ("MLS", ["mls", "usa"]),
-    ("Copa Libertadores", ["copa libertadores", "libertadores"]),
-]
+def limit_to_top_leagues(fixtures: List[Dict], max_leagues: int) -> List[Dict]:
+    league_counts: Dict[int, int] = {}
+    for fx in fixtures:
+        lid = fx.get("league", {}).get("id")
+        if lid is None:
+            continue
+        league_counts[int(lid)] = league_counts.get(int(lid), 0) + 1
 
-def resolve_top_league_ids() -> Dict[str, int]:
-    """
-    Busca /leagues?current=true e tenta achar 1 liga por padrão.
-    Retorna: {nome_amigavel: league_id}
-    """
-    leagues = apisports_leagues_current()
-    out: Dict[str, int] = {}
+    top_ids = [lid for lid, _ in sorted(league_counts.items(), key=lambda x: x[1], reverse=True)[:max_leagues]]
+    top_set = set(top_ids)
+    return [fx for fx in fixtures if int(fx.get("league", {}).get("id", -1)) in top_set]
 
-    for friendly, keys in TOP_LEAGUE_PATTERNS:
-        want = [k.lower() for k in keys]
-        found_id = None
-
-        for item in leagues:
-            lg = item.get("league", {}) or {}
-            ct = item.get("country", {}) or {}
-            name = norm_text(lg.get("name", ""))
-            country = norm_text(ct.get("name", ""))
-            # string "alvo"
-            hay = f"{name} {country}"
-
-            ok = True
-            for w in want:
-                if w not in hay:
-                    ok = False
-                    break
-            if ok:
-                found_id = lg.get("id")
-                break
-
-        if found_id:
-            out[friendly] = int(found_id)
-
-    return out
 
 # =============================
-# Render
+# Picks builder (para UMA aba/mercado)
 # =============================
-def render_cards(rows: List[Dict], use_ai: bool):
-    if not rows:
-        st.info("Sem picks para mostrar.")
+def build_picks_for_market(
+    fixtures: List[Dict],
+    market: str,
+    last_n_form: int,
+    home_adv: float,
+    one_per_league: bool,
+    min_odd: float,
+    zebra_min_odd: float,
+    max_picks: int,
+    bookmaker: int,
+) -> List[Dict]:
+    picks: List[Dict] = []
+    used_leagues = set()
+
+    for fx in fixtures:
+        try:
+            fixture_id = int(fx["fixture"]["id"])
+            league_id = int(fx["league"]["id"])
+            league_name = fx["league"]["name"]
+            home = fx["teams"]["home"]
+            away = fx["teams"]["away"]
+            home_id, away_id = int(home["id"]), int(away["id"])
+
+            if one_per_league and league_id in used_leagues:
+                continue
+
+            # forma + lambdas
+            home_last = get_last_team_fixtures(home_id, last=last_n_form, status="FT")
+            away_last = get_last_team_fixtures(away_id, last=last_n_form, status="FT")
+            home_form = compute_team_form(home_id, home_last)
+            away_form = compute_team_form(away_id, away_last)
+            lam_h, lam_a, ev = estimate_lambdas(home_form, away_form, home_adv=home_adv)
+
+            # odds (1 request por fixture, por aba)
+            odds_resp = get_odds_for_fixture(fixture_id, bookmaker=bookmaker)
+
+            dt_local = parse_fixture_time_local(fx)
+            time_str = dt_local.strftime("%H:%M") if dt_local else "??:??"
+            match_name = f"{home['name']} vs {away['name']}"
+
+            def push(pick_name: str, prob: float, odd: float):
+                fo = fair_odds(prob) or 0.0
+                edge = (odd / fo) - 1.0 if fo > 0 else None
+                picks.append({
+                    "league_id": league_id,
+                    "league": league_name,
+                    "time": time_str,
+                    "match": match_name,
+                    "pick": pick_name,
+                    "prob": prob,
+                    "odd": odd,
+                    "fair": fo,
+                    "edge": edge,
+                    "ev": ev,
+                    "lam": (lam_h, lam_a),
+                    "fixture_id": fixture_id,
+                })
+                used_leagues.add(league_id)
+
+            # --------- mercados ----------
+            if market == "Over 1.5":
+                p = prob_over_total(lam_h, lam_a, 1.5)
+                odd = _extract_market_odds(odds_resp, ["goals over/under"], ["over 1.5"])
+                if odd and odd >= min_odd:
+                    push("Over 1.5", p, odd)
+
+            elif market == "Over 2.5":
+                p = prob_over_total(lam_h, lam_a, 2.5)
+                odd = _extract_market_odds(odds_resp, ["goals over/under"], ["over 2.5"])
+                if odd and odd >= min_odd:
+                    push("Over 2.5", p, odd)
+
+            elif market == "BTTS":
+                p = prob_btts(lam_h, lam_a)
+                odd = _extract_market_odds(odds_resp, ["both teams score"], ["yes"])
+                if odd and odd >= min_odd:
+                    push("BTTS (Yes)", p, odd)
+
+            elif market == "1X2":
+                pH, pD, pA = prob_1x2(lam_h, lam_a)
+                odd_home = _extract_market_odds(odds_resp, ["match winner"], ["home"])
+                odd_draw = _extract_market_odds(odds_resp, ["match winner"], ["draw"])
+                odd_away = _extract_market_odds(odds_resp, ["match winner"], ["away"])
+
+                candidates = []
+                if odd_home and odd_home >= min_odd:
+                    candidates.append(("Home", pH, odd_home))
+                if odd_draw and odd_draw >= min_odd:
+                    candidates.append(("Draw", pD, odd_draw))
+                if odd_away and odd_away >= min_odd:
+                    candidates.append(("Away", pA, odd_away))
+
+                best = None
+                best_edge = -999
+                for name, p, o in candidates:
+                    fo = fair_odds(p) or 0.0
+                    if fo <= 0:
+                        continue
+                    e = (o / fo) - 1.0
+                    if e > best_edge:
+                        best_edge = e
+                        best = (name, p, o)
+
+                if best:
+                    name, p, o = best
+                    push(f"1X2: {name}", p, o)
+
+            elif market in ("DC+Over1.5", "DC+Over2.5"):
+                line = 1.5 if market == "DC+Over1.5" else 2.5
+                p_over = prob_over_total(lam_h, lam_a, line)
+                odd_over = _extract_market_odds(odds_resp, ["goals over/under"], [f"over {line}"])
+                if not odd_over or odd_over < min_odd:
+                    continue
+
+                pH, pD, pA = prob_1x2(lam_h, lam_a)
+                p_1x, p_x2, p_12 = pH + pD, pA + pD, pH + pA
+
+                odd_1x = _extract_market_odds(odds_resp, ["double chance"], ["home/draw"]) or _extract_market_odds(odds_resp, ["double chance"], ["1x"])
+                odd_x2 = _extract_market_odds(odds_resp, ["double chance"], ["draw/away"]) or _extract_market_odds(odds_resp, ["double chance"], ["x2"])
+                odd_12 = _extract_market_odds(odds_resp, ["double chance"], ["home/away"]) or _extract_market_odds(odds_resp, ["double chance"], ["12"])
+
+                for dc_name, p_dc, odd_dc in [("1X", p_1x, odd_1x), ("X2", p_x2, odd_x2), ("12", p_12, odd_12)]:
+                    if not odd_dc or odd_dc < min_odd:
+                        continue
+                    p_combo = clamp(p_dc * p_over, 0.0, 1.0)
+                    odd_proxy = odd_dc * odd_over
+                    if odd_proxy >= min_odd:
+                        push(f"{dc_name} + Over {line} (odd proxy)", p_combo, odd_proxy)
+
+            elif market == "Zebras":
+                pH, pD, pA = prob_1x2(lam_h, lam_a)
+                odd_home = _extract_market_odds(odds_resp, ["match winner"], ["home"])
+                odd_draw = _extract_market_odds(odds_resp, ["match winner"], ["draw"])
+                odd_away = _extract_market_odds(odds_resp, ["match winner"], ["away"])
+
+                zebra_candidates = []
+                if odd_home and odd_home >= zebra_min_odd:
+                    zebra_candidates.append(("Home", pH, odd_home))
+                if odd_away and odd_away >= zebra_min_odd:
+                    zebra_candidates.append(("Away", pA, odd_away))
+                if odd_draw and odd_draw >= zebra_min_odd:
+                    zebra_candidates.append(("Draw", pD, odd_draw))
+
+                best = None
+                best_edge = -999
+                for name, p, o in zebra_candidates:
+                    fo = fair_odds(p) or 0.0
+                    if fo <= 0:
+                        continue
+                    e = (o / fo) - 1.0
+                    if e > best_edge:
+                        best_edge = e
+                        best = (name, p, o)
+
+                if best:
+                    name, p, o = best
+                    push(f"Zebra: {name}", p, o)
+
+        except Exception:
+            continue
+
+    # ordena por edge desc (se tiver), depois prob desc
+    picks = sorted(
+        picks,
+        key=lambda x: (
+            -999 if x.get("edge") is None else -x["edge"],
+            -x.get("prob", 0.0),
+        ),
+    )[:max_picks]
+
+    return picks
+
+
+def render_picks(picks: List[Dict]):
+    if not picks:
+        st.info("Sem picks que passem nos filtros (ou odds indisponíveis).")
         return
 
-    for r in rows:
-        odd_txt = f"{r['odd']:.2f}" if r["odd"] is not None else "—"
-        fair_txt = f"{r['fair']:.2f}" if r["fair"] is not None else "—"
-        edge_txt = f"{r['edge']*100:.1f}%" if r["edge"] is not None else "—"
-
+    for p in picks:
+        edge = p.get("edge")
+        edge_txt = f"{edge*100:.1f}%" if edge is not None else "n/a"
         st.markdown(
             f"""
-<div class="card card-left">
-  <div class="meta"><b>{r['time']}</b> | <b>{r['league']}</b></div>
-  <div class="pickline"><b>{r['match']}</b></div>
-  <div class="pickline">Pick: <b>{r['pick']}</b></div>
-  <div class="kpi">
-    <span>Prob: <b>{r['prob']:.3f}</b></span>
-    <span>Odd: <b>{odd_txt}</b></span>
-    <span>Justa: <b>{fair_txt}</b></span>
-    <span>Edge: <b>{edge_txt}</b></span>
-    <span>Evid.: <b>{r['ev']}</b></span>
+<div class="card">
+  <div><span class="badge">{p['time']}</span> <b>{p['league']}</b></div>
+  <div style="margin-top:6px;"><b>{p['match']}</b></div>
+  <div style="margin-top:6px;">
+    Pick: <b>{p['pick']}</b><br/>
+    Prob(modelo): <b>{p['prob']:.3f}</b> | Odd mercado: <b>{p['odd']:.2f}</b> | Odd justa: <b>{p['fair']:.2f}</b> | Edge: <b>{edge_txt}</b><br/>
+    Evidência: <b>{p['ev']}</b> | λ: {p['lam'][0]:.2f}-{p['lam'][1]:.2f}
+  </div>
+  <div class="muted" style="margin-top:6px;">
+    Nota: DC+Over usa odd proxy quando a odd combinada não existe no feed.
   </div>
 </div>
 """,
             unsafe_allow_html=True,
         )
 
-        if use_ai:
-            with st.expander("IA: análise", expanded=False):
-                st.write(ai_explain(r["home"], r["away"], r["league"], r["pick"], r["prob"], r["odd"], r["ev"]))
 
 # =============================
 # MAIN
 # =============================
 def main():
-    if HAS_AUTOREFRESH and not st.session_state["pause_refresh"]:
-        st_autorefresh(interval=1000, key="clock")
-    else:
-        time.sleep(0.01)
-
     now_local = datetime.now(LOCAL_TZ)
-    whatsapp_link = "https://wa.me/258867926665"
 
-    st.markdown(
-        f"""
-<div class="hero">
-  <p class="hero-title">Melhores Palpites e Possível Zebras do Dia.</p>
-  <div class="hero-sub"><b>Local:</b> Inhassoro &nbsp; | &nbsp; <b>Hora:</b> {now_local.strftime('%H:%M:%S')}</div>
-  <div class="pills">
-    <span class="pill brand">By Nzualo</span>
-    <a class="whatsapp" href="{whatsapp_link}" target="_blank" rel="noopener noreferrer">WhatsApp</a>
-  </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-    with st.expander("Diagnóstico de APIs (secrets)", expanded=False):
-        st.write({
-            "APISPORTS_KEY": has_secret("APISPORTS_KEY"),
-            "OPENAI_API_KEY": has_secret("OPENAI_API_KEY"),
-            "timezone_used": LOCAL_TZ_NAME,
-        })
+    st.title("🛡️ Elite Scanner 4.1 — Abas com botão Gerar")
+    st.write(f"📍 Inhassoro/Maputo | 🕒 {now_local.strftime('%H:%M:%S')}")
 
     with st.sidebar:
-        st.subheader("Configuração")
-        modo = st.selectbox("Buscar jogos", ["Jogos do dia (Maputo)", "Próximas 24h"], index=0)
-        top_picks = st.slider("Top picks", 5, 20, 10, 1)
-        last_n = st.slider("Forma (últimos FT)", 4, 20, 10, 1)
+        st.subheader("Configuração rápida")
+        auto_tomorrow_if_empty = st.checkbox("Se hoje não tiver jogos futuros, usar amanhã", value=True)
+        max_picks = st.slider("Top picks por aba", 5, 20, 10, 1)
+        one_per_league = st.checkbox("1 pick por liga", value=True)
+        max_leagues = st.slider("Máx. ligas/campeonatos", 5, 30, MAX_LEAGUES_DEFAULT, 1)
+
+        last_n_form = st.slider("Forma (últimos jogos FT)", 4, 20, 10, 1)
         home_adv = st.slider("Vantagem de casa", 1.00, 1.20, 1.08, 0.01)
-        min_odd = st.number_input("Odd mínima (se houver)", value=1.30, min_value=1.01, step=0.01)
-        use_ai = st.checkbox("IA ligada", value=HAS_OPENAI and has_secret("OPENAI_API_KEY"))
 
-        st.caption("Nota: odds podem vir vazias no plano free; o modelo ainda gera probabilidades.")
+        bookmaker = st.number_input("Bookmaker ID (odds)", value=8, min_value=1, step=1)
+        min_odd = st.number_input("Odd mínima (normais)", value=1.30, min_value=1.01, step=0.01)
+        zebra_min_odd = st.number_input("Odd mínima (zebras)", value=4.00, min_value=2.00, step=0.10)
 
-    # Resolve TOP 10 ligas (IDs dinâmicos)
-    top_map = resolve_top_league_ids()
-    if not top_map:
-        st.error("Não consegui resolver as ligas TOP via /leagues. Verifique se a API-SPORTS está a responder.")
-        return
+    # Fixtures hoje (futuros)
+    date_to_use = now_local.date()
+    fixtures = get_fixtures_by_date(date_to_use.strftime("%Y-%m-%d"))
+    fixtures = [fx for fx in fixtures if is_future_fixture(fx, now_local)]
 
-    # Permitir ao usuário ajustar as ligas (por padrão: 10)
-    default_names = list(top_map.keys())[:10]
-    selected_names = st.multiselect("TOP ligas/campeonatos (máx 10)", options=list(top_map.keys()), default=default_names)
-    selected_names = selected_names[:10]
-    selected_ids = {top_map[n] for n in selected_names}
-
-    # Buscar fixtures
-    fixtures_raw: List[Dict] = []
-    if modo == "Jogos do dia (Maputo)":
-        date_str = now_local.strftime("%Y-%m-%d")
-        raw = apisports_fixtures_by_date(date_str)
-        fixtures_raw = raw.get("response", []) or []
-    else:
-        from_str = now_local.strftime("%Y-%m-%d")
-        to_str = (now_local + timedelta(days=2)).strftime("%Y-%m-%d")
-        raw = apisports_fixtures_window(from_str, to_str)
-        fixtures_raw = raw.get("response", []) or []
-
-    # filtrar por ligas TOP
-    fixtures = []
-    for f in fixtures_raw:
-        try:
-            league_id = int(f["league"]["id"])
-        except Exception:
-            continue
-        if league_id in selected_ids:
-            fixtures.append(f)
-
-    # ordenar por hora
-    fixtures.sort(key=lambda x: (parse_iso_local(x["fixture"]["date"]) or datetime.max))
-
-    # debug simples
-    with st.expander("Debug fixtures", expanded=False):
-        st.write({
-            "modo": modo,
-            "fixtures_raw_total": len(fixtures_raw),
-            "fixtures_after_top_leagues": len(fixtures),
-            "top_leagues_selected": selected_names,
-        })
-        if fixtures[:3]:
-            ex = []
-            for fx in fixtures[:3]:
-                dt = parse_iso_local(fx["fixture"]["date"])
-                ex.append({
-                    "league": fx["league"]["name"],
-                    "home": fx["teams"]["home"]["name"],
-                    "away": fx["teams"]["away"]["name"],
-                    "time_local": dt.strftime("%Y-%m-%d %H:%M:%S") if dt else None,
-                    "status": fx.get("fixture", {}).get("status", {}).get("short"),
-                })
-            st.write(ex)
+    # Amanhã se vazio
+    if not fixtures and auto_tomorrow_if_empty:
+        date_to_use = (now_local + timedelta(days=1)).date()
+        fixtures = get_fixtures_by_date(date_to_use.strftime("%Y-%m-%d"))
+        fixtures = [fx for fx in fixtures if parse_fixture_time_local(fx) is not None]
 
     if not fixtures:
-        st.error("Nenhum jogo encontrado nas TOP ligas selecionadas. Troque para 'Próximas 24h' ou mude a lista de ligas.")
+        st.error("Nenhum jogo encontrado.")
         return
 
-    st.markdown("<div class='smallnote'>Clique em Gerar para criar Top picks 1X2 (1 por jogo, baseado em probabilidades).</div>", unsafe_allow_html=True)
+    # Limita a 20 ligas (ou o valor do slider)
+    fixtures = limit_to_top_leagues(fixtures, max_leagues=max_leagues)
 
-    if st.button("Gerar Top Picks (1X2)", key="gen_1x2"):
-        st.session_state["pause_refresh"] = True
-        prog = st.progress(0)
-        msg = st.empty()
+    st.markdown(
+        f"🗓️ Data analisada: <span class='badge'>{date_to_use.strftime('%d/%m/%Y')}</span>",
+        unsafe_allow_html=True,
+    )
+    st.caption(f"Jogos carregados (após limite de ligas): {len(fixtures)} | Máx. ligas: {max_leagues}")
 
-        rows = []
-        total = min(len(fixtures), 60)  # limite de custo/tempo
+    tabs = st.tabs(["🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "👥 DC+O1.5", "👥 DC+O2.5", "🟣 Zebras"])
+    markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5", "Zebras"]
 
-        for i, f in enumerate(fixtures[:total], start=1):
-            prog.progress(int(i * 100 / total))
-            msg.write(f"A analisar {i}/{total} jogos...")
+    for tab, market in zip(tabs, markets):
+        with tab:
+            st.subheader(f"Mercado: {market}")
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                if st.button(f"🚀 Gerar Top {max_picks}", key=f"btn_{market}"):
+                    picks = build_picks_for_market(
+                        fixtures=fixtures,
+                        market=market,
+                        last_n_form=last_n_form,
+                        home_adv=home_adv,
+                        one_per_league=one_per_league,
+                        min_odd=min_odd,
+                        zebra_min_odd=zebra_min_odd,
+                        max_picks=max_picks,
+                        bookmaker=bookmaker,
+                    )
+                    st.session_state[f"picks_{market}"] = picks
 
-            dt_local = parse_iso_local(f["fixture"]["date"])
-            if not dt_local:
-                continue
+            with col2:
+                st.write(
+                    "Critérios: odds mínimas + ranking por edge (odd mercado vs odd justa do modelo). "
+                    "Se não aparecerem picks, é porque o feed de odds não retornou linhas para esses jogos/mercados."
+                )
 
-            home = f["teams"]["home"]["name"]
-            away = f["teams"]["away"]["name"]
-            league = f["league"]["name"]
-
-            home_id = int(f["teams"]["home"]["id"])
-            away_id = int(f["teams"]["away"]["id"])
-
-            home_last = apisports_team_last(home_id, last=last_n)
-            away_last = apisports_team_last(away_id, last=last_n)
-
-            lam_h, lam_a, ev = estimate_lambdas(
-                compute_team_form(home_id, home_last),
-                compute_team_form(away_id, away_last),
-                home_adv=home_adv,
-            )
-
-            pH, pD, pA = prob_1x2(lam_h, lam_a)
-
-            # odds 1x2 via API-SPORTS (pode vir vazio)
-            odd_home = odd_draw = odd_away = None
-            try:
-                oresp = apisports_odds_fixture(int(f["fixture"]["id"]))
-                odd_home = apisports_extract_market(oresp, "Match Winner", "Home")
-                odd_draw = apisports_extract_market(oresp, "Match Winner", "Draw")
-                odd_away = apisports_extract_market(oresp, "Match Winner", "Away")
-            except Exception:
-                pass
-
-            cands = [
-                ("Casa", pH, odd_home),
-                ("Empate", pD, odd_draw),
-                ("Fora", pA, odd_away),
-            ]
-
-            # escolher melhor: se tiver odd respeita odd mínima; senão só prob
-            best = None
-            best_score = -1.0
-            for nm, pr, od in cands:
-                if od is not None and od < min_odd:
-                    continue
-                score = pr if od is None else pr * od
-                if score > best_score:
-                    best_score = score
-                    best = (nm, pr, od)
-
-            if not best:
-                continue
-
-            nm, pr, od = best
-            fo = fair_odds(pr)
-            edge = ((od / fo) - 1.0) if (od is not None and fo) else None
-
-            rows.append({
-                "time": dt_local.strftime("%H:%M"),
-                "league": league,
-                "match": f"{home} vs {away}",
-                "home": home,
-                "away": away,
-                "pick": f"1X2: {nm}",
-                "prob": pr,
-                "odd": od,
-                "fair": fo,
-                "edge": edge,
-                "ev": ev,
-            })
-
-        msg.write("Concluído.")
-        rows = sorted(rows, key=lambda r: (-(r["edge"] if r["edge"] is not None else -999), -r["prob"]))[:top_picks]
-        st.session_state["rows_1x2"] = rows
-
-    render_cards(st.session_state["rows_1x2"], use_ai=use_ai)
+            picks_cached = st.session_state.get(f"picks_{market}", [])
+            render_picks(picks_cached)
 
 
 if __name__ == "__main__":
