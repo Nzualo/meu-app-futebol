@@ -252,7 +252,7 @@ def estimate_lambdas(home_form, away_form, home_adv: float = 1.08) -> Tuple[floa
 
 
 # =============================
-# Odds parsing (robusto por keywords)
+# Odds parsing
 # =============================
 def _extract_market_odds(odds_response: List[Dict], market_keywords: List[str], selection_keywords: List[str]) -> Optional[float]:
     try:
@@ -276,7 +276,7 @@ def _extract_market_odds(odds_response: List[Dict], market_keywords: List[str], 
 
 
 # =============================
-# Fixture filtering to MAX 20 leagues
+# Fixture filtering
 # =============================
 def limit_to_top_leagues(fixtures: List[Dict], max_leagues: int) -> List[Dict]:
     league_counts: Dict[int, int] = {}
@@ -292,7 +292,7 @@ def limit_to_top_leagues(fixtures: List[Dict], max_leagues: int) -> List[Dict]:
 
 
 # =============================
-# Picks builder (para UMA aba/mercado)
+# Picks builder (por mercado)
 # =============================
 def build_picks_for_market(
     fixtures: List[Dict],
@@ -357,6 +357,7 @@ def build_picks_for_market(
                     "ev": ev,
                     "lam": (lam_h, lam_a),
                     "fixture_id": fixture_id,
+                    "market": market,
                 })
                 used_leagues.add(league_id)
 
@@ -504,12 +505,77 @@ def render_picks(picks: List[Dict]):
 
 
 # =============================
+# TOP PICKS (6-10 misturados)
+# =============================
+def build_top_picks(
+    fixtures: List[Dict],
+    last_n_form: int,
+    home_adv: float,
+    min_odd: float,
+    zebra_min_odd: float,
+    bookmaker: int,
+    top_n: int,
+) -> List[Dict]:
+    markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5", "Zebras"]
+
+    pbar = st.progress(0)
+    ptxt = st.empty()
+
+    all_candidates: List[Dict] = []
+
+    for i, m in enumerate(markets, start=1):
+        pbar.progress(int((i - 1) * 100 / len(markets)))
+        ptxt.markdown(f"<div class='ptext'>A gerar candidatos: {m} ({i}/{len(markets)})...</div>", unsafe_allow_html=True)
+
+        st.session_state["_show_progress"] = False  # evita múltiplas barras
+
+        cand = build_picks_for_market(
+            fixtures=fixtures,
+            market=m,
+            last_n_form=last_n_form,
+            home_adv=home_adv,
+            one_per_league=False,          # <- globalmente filtramos depois
+            min_odd=min_odd,
+            zebra_min_odd=zebra_min_odd,
+            max_picks=25,
+            bookmaker=bookmaker,
+        )
+        all_candidates.extend(cand)
+
+    pbar.progress(100)
+    ptxt.markdown("<div class='ptext'>A selecionar Top Picks finais...</div>", unsafe_allow_html=True)
+
+    ev_rank = {"ALTA": 2, "MÉDIA": 1, "BAIXA": 0}
+    all_candidates = sorted(
+        all_candidates,
+        key=lambda x: (
+            -999 if x.get("edge") is None else -x["edge"],
+            -x.get("prob", 0.0),
+            -ev_rank.get(x.get("ev", "BAIXA"), 0),
+        ),
+    )
+
+    final: List[Dict] = []
+    used_leagues = set()
+    for c in all_candidates:
+        lid = c.get("league_id")
+        if lid in used_leagues:
+            continue
+        final.append(c)
+        used_leagues.add(lid)
+        if len(final) >= top_n:
+            break
+
+    ptxt.markdown("<div class='ptext'>Concluído.</div>", unsafe_allow_html=True)
+    return final
+
+
+# =============================
 # MAIN
 # =============================
 def main():
     now_local = datetime.now(LOCAL_TZ)
 
-    # Header
     st.markdown(
         f"""
 <div class="barca-header">
@@ -538,8 +604,11 @@ def main():
     with st.sidebar:
         st.subheader("Configuração")
         auto_tomorrow_if_empty = st.checkbox("Se hoje não tiver jogos futuros, usar amanhã", value=True)
+
+        top_picks_n = st.slider("Top Picks do Dia (6 a 10)", 6, 10, 8, 1)
+
         max_picks = st.slider("Top picks por aba", 5, 20, 10, 1)
-        one_per_league = st.checkbox("1 pick por liga", value=True)
+        one_per_league = st.checkbox("1 pick por liga (em cada aba)", value=True)
         max_leagues = st.slider("Máx. ligas/campeonatos", 5, 30, MAX_LEAGUES_DEFAULT, 1)
 
         last_n_form = st.slider("Forma (últimos jogos FT)", 4, 20, 10, 1)
@@ -551,20 +620,19 @@ def main():
 
         debug = st.checkbox("Mostrar diagnóstico (debug)", value=False)
 
-    # Carrega fixtures (hoje)
+    # --- Fixtures hoje (futuros) ---
     date_to_use = now_local.date()
     date_str = date_to_use.strftime("%Y-%m-%d")
     fixtures_raw = get_fixtures_by_date(date_str)
     fixtures = [fx for fx in fixtures_raw if is_future_fixture(fx, now_local)]
 
-    # Amanhã se vazio (mantém lógica original)
+    # --- Amanhã se vazio ---
     if not fixtures and auto_tomorrow_if_empty:
         date_to_use = (now_local + timedelta(days=1)).date()
         date_str = date_to_use.strftime("%Y-%m-%d")
         fixtures_raw = get_fixtures_by_date(date_str)
         fixtures = [fx for fx in fixtures_raw if parse_fixture_time_local(fx) is not None]
 
-    # Diagnóstico para entender porque “não tem jogos”
     if debug:
         with st.expander("Diagnóstico (fixtures/tempo)"):
             st.write("Data usada:", date_str)
@@ -576,9 +644,9 @@ def main():
                 st.write("Exemplo 1º fixture (hora local):", s.isoformat() if s else None)
                 st.write("Exemplo league:", fixtures_raw[0].get("league", {}).get("name"))
             else:
-                st.warning("API retornou 0 fixtures (pode ser quota, chave errada, ou data sem jogos).")
+                st.warning("API retornou 0 fixtures (quota, chave errada, ou data sem jogos).")
 
-    # Limita ligas somente se houver fixtures
+    # Limita ligas (se houver jogos)
     if fixtures:
         fixtures = limit_to_top_leagues(fixtures, max_leagues=max_leagues)
 
@@ -588,21 +656,44 @@ def main():
     )
     st.caption(f"Jogos carregados (após filtros): {len(fixtures)} | Máx. ligas: {max_leagues}")
 
-    # ✅ Abas SEMPRE aparecem (mesmo se fixtures = [])
-    tabs = st.tabs(["🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "👥 DC+O1.5", "👥 DC+O2.5", "🟣 Zebras"])
-    markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5", "Zebras"]
+    # ✅ Abas SEMPRE visíveis + Top Picks incluída
+    tabs = st.tabs(
+        ["⭐ Top Picks", "🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "👥 DC+O1.5", "👥 DC+O2.5", "🟣 Zebras"]
+    )
 
-    for tab, market in zip(tabs, markets):
+    # ====== ABA TOP PICKS ======
+    with tabs[0]:
+        st.subheader("⭐ Top Picks do Dia (misturados)")
+        st.caption("Mistura mercados e escolhe 6–10 melhores no geral, com 1 pick por liga.")
+
+        disabled = (len(fixtures) == 0)
+        if st.button(f"🚀 Gerar Top Picks ({top_picks_n})", key="btn_top", disabled=disabled):
+            picks = build_top_picks(
+                fixtures=fixtures,
+                last_n_form=last_n_form,
+                home_adv=home_adv,
+                min_odd=min_odd,
+                zebra_min_odd=zebra_min_odd,
+                bookmaker=bookmaker,
+                top_n=top_picks_n,
+            )
+            st.session_state["picks_TOP"] = picks
+
+        if disabled:
+            st.warning("Sem jogos para analisar agora. Ative 'usar amanhã' ou verifique a API/odds.")
+        render_picks(st.session_state.get("picks_TOP", []))
+
+    # ====== OUTRAS ABAS ======
+    markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5", "Zebras"]
+    for tab, market in zip(tabs[1:], markets):
         with tab:
             st.subheader(f"Mercado: {market}")
 
-            if not fixtures:
-                st.warning("Nenhum jogo disponível para analisar nesta data. Ative 'usar amanhã' ou verifique a API.")
-                continue
+            disabled = (len(fixtures) == 0)
 
             col1, col2 = st.columns([1, 2])
             with col1:
-                if st.button(f"🚀 Gerar Top {max_picks}", key=f"btn_{market}"):
+                if st.button(f"🚀 Gerar Top {max_picks}", key=f"btn_{market}", disabled=disabled):
                     st.session_state["_show_progress"] = True
                     try:
                         picks = build_picks_for_market(
@@ -623,9 +714,11 @@ def main():
             with col2:
                 st.write(
                     "Critérios: odds mínimas + ranking por edge (odd mercado vs odd justa do modelo). "
-                    "Se não aparecerem picks, é porque o feed de odds não retornou linhas para esses jogos/mercados."
+                    "Se não aparecerem picks, o feed de odds pode não ter linhas para esse mercado/jogo."
                 )
 
+            if disabled:
+                st.warning("Sem jogos para analisar agora. Ative 'usar amanhã' ou verifique a API/odds.")
             render_picks(st.session_state.get(f"picks_{market}", []))
 
 
