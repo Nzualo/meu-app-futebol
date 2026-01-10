@@ -1,10 +1,18 @@
 import math
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 import pytz
 import requests
 import streamlit as st
+
+# Tenta usar autorefresh (melhor para relógio contínuo)
+try:
+    from streamlit_autorefresh import st_autorefresh
+    HAS_AUTOREFRESH = True
+except Exception:
+    HAS_AUTOREFRESH = False
 
 # =============================
 # CONFIG
@@ -13,17 +21,107 @@ LOCAL_TZ = pytz.timezone("Africa/Maputo")
 API_BASE = "https://v3.football.api-sports.io"
 MAX_LEAGUES_DEFAULT = 20
 
-st.set_page_config(page_title="Elite Scanner 4.1", layout="wide")
+st.set_page_config(page_title="Melhores Palpites do Dia", layout="wide")
 
+# =============================
+# DESIGN / CSS
+# =============================
 st.markdown(
     """
 <style>
-.main { background-color: #0e1117; }
-.card { background-color: #1a1c24; padding: 14px; border-radius: 12px;
-        border-left: 7px solid #00ff00; color: white; margin-bottom: 10px; }
-.muted { color: #aab; font-size: 0.90rem; }
-.badge { background-color: #00ff00; color: black; padding: 4px 10px; border-radius: 14px;
-         font-weight: 700; display:inline-block; }
+/* Base */
+.main { background-color: #0b0f17; }
+.block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
+h1, h2, h3, p, div, span { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+
+/* Header */
+.hero {
+  border-radius: 16px;
+  padding: 18px 18px;
+  background: linear-gradient(135deg, rgba(0,255,0,0.14), rgba(15,22,35,0.95));
+  border: 1px solid rgba(0,255,0,0.22);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.30);
+  margin-bottom: 16px;
+}
+.hero-title {
+  font-size: 1.35rem;
+  font-weight: 800;
+  color: #eaffea;
+  margin: 0;
+}
+.hero-sub {
+  margin-top: 8px;
+  color: #cdd6e0;
+  font-size: 0.95rem;
+}
+.pills { margin-top: 10px; display:flex; gap:8px; flex-wrap: wrap; }
+.pill {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.10);
+  color: #e9eef7;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 0.85rem;
+}
+.brand {
+  margin-left:auto;
+  background: rgba(0,255,0,0.12);
+  border: 1px solid rgba(0,255,0,0.22);
+  color: #d7ffd7;
+}
+
+/* Cards */
+.card {
+  background-color: #141a27;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 8px 22px rgba(0,0,0,0.28);
+  margin-bottom: 10px;
+}
+.card-left {
+  border-left: 6px solid #00ff00;
+}
+.meta {
+  color: #aab6c5;
+  font-size: 0.88rem;
+}
+.pickline {
+  margin-top: 8px;
+  font-size: 1.02rem;
+}
+.kpi {
+  display:flex;
+  gap:10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.kpi span {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.08);
+  padding: 6px 10px;
+  border-radius: 10px;
+  font-size: 0.88rem;
+  color: #e8eef7;
+}
+
+/* WhatsApp button */
+a.whatsapp {
+  display:inline-block;
+  text-decoration:none;
+  font-weight: 800;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(0,255,0,0.35);
+  background: rgba(0,255,0,0.16);
+  color: #eaffea;
+}
+a.whatsapp:hover {
+  background: rgba(0,255,0,0.24);
+}
+
+/* Tabs spacing */
+div[data-baseweb="tab-list"] { gap: 6px; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -228,7 +326,7 @@ def estimate_lambdas(home_form, away_form, home_adv: float = 1.08) -> Tuple[floa
 
 
 # =============================
-# Odds parsing (robusto por keywords)
+# Odds parsing
 # =============================
 def _extract_market_odds(odds_response: List[Dict], market_keywords: List[str], selection_keywords: List[str]) -> Optional[float]:
     try:
@@ -252,7 +350,7 @@ def _extract_market_odds(odds_response: List[Dict], market_keywords: List[str], 
 
 
 # =============================
-# Fixture filtering to MAX 20 leagues
+# Limit to top leagues
 # =============================
 def limit_to_top_leagues(fixtures: List[Dict], max_leagues: int) -> List[Dict]:
     league_counts: Dict[int, int] = {}
@@ -268,7 +366,7 @@ def limit_to_top_leagues(fixtures: List[Dict], max_leagues: int) -> List[Dict]:
 
 
 # =============================
-# Picks builder (para UMA aba/mercado)
+# Picks builder (ONE market per run)
 # =============================
 def build_picks_for_market(
     fixtures: List[Dict],
@@ -303,7 +401,6 @@ def build_picks_for_market(
             away_form = compute_team_form(away_id, away_last)
             lam_h, lam_a, ev = estimate_lambdas(home_form, away_form, home_adv=home_adv)
 
-            # odds (1 request por fixture, por aba)
             odds_resp = get_odds_for_fixture(fixture_id, bookmaker=bookmaker)
 
             dt_local = parse_fixture_time_local(fx)
@@ -325,11 +422,9 @@ def build_picks_for_market(
                     "edge": edge,
                     "ev": ev,
                     "lam": (lam_h, lam_a),
-                    "fixture_id": fixture_id,
                 })
                 used_leagues.add(league_id)
 
-            # --------- mercados ----------
             if market == "Over 1.5":
                 p = prob_over_total(lam_h, lam_a, 1.5)
                 odd = _extract_market_odds(odds_resp, ["goals over/under"], ["over 1.5"])
@@ -431,13 +526,9 @@ def build_picks_for_market(
         except Exception:
             continue
 
-    # ordena por edge desc (se tiver), depois prob desc
     picks = sorted(
         picks,
-        key=lambda x: (
-            -999 if x.get("edge") is None else -x["edge"],
-            -x.get("prob", 0.0),
-        ),
+        key=lambda x: (-999 if x.get("edge") is None else -x["edge"], -x.get("prob", 0.0)),
     )[:max_picks]
 
     return picks
@@ -453,17 +544,19 @@ def render_picks(picks: List[Dict]):
         edge_txt = f"{edge*100:.1f}%" if edge is not None else "n/a"
         st.markdown(
             f"""
-<div class="card">
-  <div><span class="badge">{p['time']}</span> <b>{p['league']}</b></div>
-  <div style="margin-top:6px;"><b>{p['match']}</b></div>
-  <div style="margin-top:6px;">
-    Pick: <b>{p['pick']}</b><br/>
-    Prob(modelo): <b>{p['prob']:.3f}</b> | Odd mercado: <b>{p['odd']:.2f}</b> | Odd justa: <b>{p['fair']:.2f}</b> | Edge: <b>{edge_txt}</b><br/>
-    Evidência: <b>{p['ev']}</b> | λ: {p['lam'][0]:.2f}-{p['lam'][1]:.2f}
+<div class="card card-left">
+  <div class="meta"><span class="badge">{p['time']}</span> &nbsp; <b>{p['league']}</b></div>
+  <div class="pickline"><b>{p['match']}</b></div>
+  <div class="pickline">Pick: <b>{p['pick']}</b></div>
+  <div class="kpi">
+    <span>Prob: <b>{p['prob']:.3f}</b></span>
+    <span>Odd: <b>{p['odd']:.2f}</b></span>
+    <span>Justa: <b>{p['fair']:.2f}</b></span>
+    <span>Edge: <b>{edge_txt}</b></span>
+    <span>Evid.: <b>{p['ev']}</b></span>
+    <span>λ: <b>{p['lam'][0]:.2f}-{p['lam'][1]:.2f}</b></span>
   </div>
-  <div class="muted" style="margin-top:6px;">
-    Nota: DC+Over usa odd proxy quando a odd combinada não existe no feed.
-  </div>
+  <div class="muted" style="margin-top:8px;">DC+Over usa odd proxy quando o feed não traz odd combinada.</div>
 </div>
 """,
             unsafe_allow_html=True,
@@ -474,13 +567,39 @@ def render_picks(picks: List[Dict]):
 # MAIN
 # =============================
 def main():
+    # Relógio contínuo
+    if HAS_AUTOREFRESH:
+        st_autorefresh(interval=1000, key="clock")  # 1s
+    else:
+        # fallback: força rerun ao carregar (menos suave)
+        time.sleep(0.01)
+
     now_local = datetime.now(LOCAL_TZ)
 
-    st.title("🛡️ Elite Scanner 4.1 — Abas com botão Gerar")
-    st.write(f"📍 Inhassoro/Maputo | 🕒 {now_local.strftime('%H:%M:%S')}")
+    # HERO HEADER
+    whatsapp_number = "258867926665"
+    whatsapp_link = f"https://wa.me/{whatsapp_number}"
+
+    st.markdown(
+        f"""
+<div class="hero">
+  <div style="display:flex; align-items:center; gap:10px;">
+    <p class="hero-title">Melhores Palpites e Possível Zebras do Dia.</p>
+  </div>
+  <div class="hero-sub">
+    <b>Local:</b> Inhassoro &nbsp; | &nbsp; <b>Hora:</b> {now_local.strftime('%H:%M:%S')}
+  </div>
+  <div class="pills">
+    <span class="pill brand">By Nzualo</span>
+    <a class="whatsapp" href="{whatsapp_link}" target="_blank" rel="noopener noreferrer">WhatsApp</a>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     with st.sidebar:
-        st.subheader("Configuração rápida")
+        st.subheader("Configuração")
         auto_tomorrow_if_empty = st.checkbox("Se hoje não tiver jogos futuros, usar amanhã", value=True)
         max_picks = st.slider("Top picks por aba", 5, 20, 10, 1)
         one_per_league = st.checkbox("1 pick por liga", value=True)
@@ -508,14 +627,9 @@ def main():
         st.error("Nenhum jogo encontrado.")
         return
 
-    # Limita a 20 ligas (ou o valor do slider)
     fixtures = limit_to_top_leagues(fixtures, max_leagues=max_leagues)
 
-    st.markdown(
-        f"🗓️ Data analisada: <span class='badge'>{date_to_use.strftime('%d/%m/%Y')}</span>",
-        unsafe_allow_html=True,
-    )
-    st.caption(f"Jogos carregados (após limite de ligas): {len(fixtures)} | Máx. ligas: {max_leagues}")
+    st.caption(f"Data analisada: {date_to_use.strftime('%d/%m/%Y')} | Jogos após limite de ligas: {len(fixtures)}")
 
     tabs = st.tabs(["🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "👥 DC+O1.5", "👥 DC+O2.5", "🟣 Zebras"])
     markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5", "Zebras"]
@@ -524,8 +638,9 @@ def main():
         with tab:
             st.subheader(f"Mercado: {market}")
             col1, col2 = st.columns([1, 2])
+
             with col1:
-                if st.button(f"🚀 Gerar Top {max_picks}", key=f"btn_{market}"):
+                if st.button(f"Gerar Top {max_picks}", key=f"btn_{market}"):
                     picks = build_picks_for_market(
                         fixtures=fixtures,
                         market=market,
@@ -541,12 +656,11 @@ def main():
 
             with col2:
                 st.write(
-                    "Critérios: odds mínimas + ranking por edge (odd mercado vs odd justa do modelo). "
-                    "Se não aparecerem picks, é porque o feed de odds não retornou linhas para esses jogos/mercados."
+                    "Ranking por edge (odd mercado vs odd justa do modelo). "
+                    "Se não aparecerem picks, o feed de odds pode não ter linhas para o jogo/mercado."
                 )
 
-            picks_cached = st.session_state.get(f"picks_{market}", [])
-            render_picks(picks_cached)
+            render_picks(st.session_state.get(f"picks_{market}", []))
 
 
 if __name__ == "__main__":
