@@ -24,15 +24,15 @@ TOP_TIPS_MIN_ODD_DEFAULT = 1.40
 TOP_TIPS_MAX_ODD_DEFAULT = 2.00
 
 # FREE limits
-FREE_MAX_GENERATES_PER_DAY = 3  # por dia
-LIMITS_FILE = "free_limits.json"  # persistência leve (fallback local)
+FREE_MAX_GENERATES_PER_DAY = 3
+LIMITS_FILE = "free_limits.json"
 
 # VIP
 VIP_PRICE_MT = 50
 VIP_DAYS = 7
 
 # WhatsApp (admin)
-WHATSAPP_ADMIN = "258867926665"  # número para receber pedidos (aprovação)
+WHATSAPP_ADMIN = "258867926665"
 MPESA_NUMBER = "841836671"
 EMOLA_NUMBER = "867926665"
 PAYMENT_NAME = "Candido Albino Nzualo"
@@ -89,12 +89,12 @@ st.markdown(
   display:inline-block; padding: 5px 10px; border-radius: 16px;
   background: rgba(255,255,255,0.08); color: #fff; font-weight: 900;
 }
-
 .admin-pill {
   display:inline-block; padding: 5px 10px; border-radius: 16px;
   background: rgba(0,255,0,0.12); color: #bfffbf; font-weight: 900;
   border: 1px solid rgba(0,255,0,0.20);
 }
+
 .warn-box{
   background: rgba(255, 205, 86, 0.10);
   border: 1px solid rgba(255, 205, 86, 0.22);
@@ -102,6 +102,24 @@ st.markdown(
   padding: 10px 12px;
   border-radius: 12px;
 }
+
+.ok-box{
+  background: rgba(0, 255, 0, 0.08);
+  border: 1px solid rgba(0, 255, 0, 0.20);
+  color: #ccffcc;
+  padding: 10px 12px;
+  border-radius: 12px;
+}
+
+.danger-box{
+  background: rgba(255, 99, 132, 0.08);
+  border: 1px solid rgba(255, 99, 132, 0.25);
+  color: #ffd0dc;
+  padding: 10px 12px;
+  border-radius: 12px;
+}
+
+.hr { border-top: 1px solid rgba(255,255,255,0.08); margin: 10px 0; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -152,9 +170,6 @@ def _safe_save_limits(data: Dict) -> None:
 
 
 def _fingerprint() -> str:
-    """
-    Identificador leve (best-effort). Em Streamlit Cloud, headers variam.
-    """
     ua = ""
     lang = ""
     try:
@@ -177,7 +192,6 @@ def is_admin() -> bool:
 
 
 def is_premium() -> bool:
-    # admin sempre tem acesso total
     if is_admin():
         return True
     return bool(st.session_state.get("is_premium", False))
@@ -215,7 +229,6 @@ def consume_generate_chance() -> None:
         cur = int(data[day].get(fp, 0))
         data[day][fp] = cur + 1
 
-        # mantém últimos 10 dias
         try:
             days_sorted = sorted(data.keys())
             if len(days_sorted) > 10:
@@ -225,6 +238,26 @@ def consume_generate_chance() -> None:
             pass
 
         _safe_save_limits(data)
+
+
+def fmt_countdown(delta: timedelta) -> str:
+    sec = int(delta.total_seconds())
+    if sec <= 0:
+        return "0 min"
+
+    days = sec // 86400
+    sec %= 86400
+    hours = sec // 3600
+    sec %= 3600
+    minutes = sec // 60
+
+    parts = []
+    if days > 0:
+        parts.append(f"{days}d")
+    if hours > 0:
+        parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
 
 
 # ============================================================
@@ -249,9 +282,6 @@ def sb_url(path: str) -> str:
 
 
 def sb_get_one(table: str, select: str, filters: str) -> Optional[Dict]:
-    """
-    filters: ex: "user_fp=eq.abc123"
-    """
     try:
         url = sb_url(f"/rest/v1/{table}?select={select}&{filters}&limit=1")
         r = requests.get(url, headers=sb_headers(), timeout=15)
@@ -264,10 +294,11 @@ def sb_get_one(table: str, select: str, filters: str) -> Optional[Dict]:
         return None
 
 
-def sb_get_many(table: str, select: str, filters: str, order: str = "") -> List[Dict]:
+def sb_get_many(table: str, select: str, filters: str, order: str = "", limit: Optional[int] = None) -> List[Dict]:
     try:
         extra = f"&order={order}" if order else ""
-        url = sb_url(f"/rest/v1/{table}?select={select}&{filters}{extra}")
+        extra2 = f"&limit={int(limit)}" if limit is not None else ""
+        url = sb_url(f"/rest/v1/{table}?select={select}&{filters}{extra}{extra2}")
         r = requests.get(url, headers=sb_headers(), timeout=20)
         r.raise_for_status()
         arr = r.json()
@@ -317,16 +348,12 @@ def sb_patch(table: str, filters: str, payload: Dict) -> bool:
 
 # ---- VIP logic (auto-expiração)
 def vip_refresh_from_supabase() -> None:
-    """
-    Se VIP estiver expirado, volta automaticamente para FREE.
-    """
     if is_admin():
         st.session_state["is_premium"] = True
         st.session_state["vip_expires_at"] = None
         return
 
     if not sb_enabled():
-        # sem supabase, não dá para VIP automático
         st.session_state["is_premium"] = False
         st.session_state["vip_expires_at"] = None
         return
@@ -347,7 +374,6 @@ def vip_refresh_from_supabase() -> None:
         return
 
     try:
-        # supabase vem ISO; parse + tz
         exp = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00")).astimezone(LOCAL_TZ)
     except Exception:
         st.session_state["is_premium"] = False
@@ -356,7 +382,6 @@ def vip_refresh_from_supabase() -> None:
 
     now = datetime.now(LOCAL_TZ)
     if exp <= now:
-        # expira automaticamente
         sb_patch("vip_users", f"user_fp=eq.{fp}", {"status": "expired"})
         st.session_state["is_premium"] = False
         st.session_state["vip_expires_at"] = None
@@ -365,10 +390,20 @@ def vip_refresh_from_supabase() -> None:
         st.session_state["vip_expires_at"] = exp
 
 
+def vip_has_pending_request(user_fp: str) -> bool:
+    if not sb_enabled():
+        return False
+    rows = sb_get_many(
+        "vip_requests",
+        "id,status,created_at",
+        f"user_fp=eq.{user_fp}&status=eq.pending",
+        order="created_at.desc",
+        limit=1,
+    )
+    return bool(rows)
+
+
 def vip_request_submit(via: str, txid: str, email: str = "") -> Optional[Dict]:
-    """
-    Cria pedido pending para admin aprovar.
-    """
     if not sb_enabled():
         return None
 
@@ -382,6 +417,11 @@ def vip_request_submit(via: str, txid: str, email: str = "") -> Optional[Dict]:
         return None
 
     fp = _fingerprint()
+
+    # Anti-spam: 1 pendente por vez
+    if vip_has_pending_request(fp):
+        return {"_blocked": True}
+
     now = datetime.now(LOCAL_TZ).astimezone(pytz.UTC).isoformat()
 
     payload = {
@@ -397,19 +437,30 @@ def vip_request_submit(via: str, txid: str, email: str = "") -> Optional[Dict]:
 
 
 def vip_request_status_for_user() -> Optional[Dict]:
-    """
-    Último pedido do user.
-    """
     if not sb_enabled():
         return None
     fp = _fingerprint()
     rows = sb_get_many(
         "vip_requests",
-        "id,created_at,via,txid,status,approved_at,expires_at",
+        "id,created_at,via,txid,status,approved_at,expires_at,admin_note",
         f"user_fp=eq.{fp}",
         order="created_at.desc",
+        limit=1,
     )
     return rows[0] if rows else None
+
+
+def vip_request_history_for_user(limit: int = 10) -> List[Dict]:
+    if not sb_enabled():
+        return []
+    fp = _fingerprint()
+    return sb_get_many(
+        "vip_requests",
+        "id,created_at,via,txid,status,approved_at,expires_at,admin_note,amount_mt",
+        f"user_fp=eq.{fp}",
+        order="created_at.desc",
+        limit=limit,
+    )
 
 
 def admin_list_pending_requests(limit: int = 50) -> List[Dict]:
@@ -420,7 +471,8 @@ def admin_list_pending_requests(limit: int = 50) -> List[Dict]:
         "id,created_at,user_fp,email,via,txid,amount_mt,status",
         "status=eq.pending",
         order="created_at.desc",
-    )[:limit]
+        limit=limit,
+    )
 
 
 def admin_approve_request(req_id: str) -> bool:
@@ -431,7 +483,6 @@ def admin_approve_request(req_id: str) -> bool:
     approved_at_utc = now.astimezone(pytz.UTC).isoformat()
     expires_at = (now + timedelta(days=VIP_DAYS)).astimezone(pytz.UTC).isoformat()
 
-    # pega request
     req = sb_get_one("vip_requests", "id,user_fp,status", f"id=eq.{req_id}")
     if not req or (req.get("status") != "pending"):
         return False
@@ -460,9 +511,6 @@ def admin_reject_request(req_id: str, note: str = "") -> bool:
 
 
 def admin_grant_vip_by_fp(user_fp: str) -> bool:
-    """
-    Dar VIP manual pelo fingerprint.
-    """
     if not (sb_enabled() and is_admin()):
         return False
     user_fp = (user_fp or "").strip()
@@ -526,7 +574,6 @@ Pick: {pick_name}
 
 Modelo: Prob={prob:.3f} | Odd={odd:.2f} | Odd justa={fair:.2f} | Edge={edge_txt} | Evidência={ev} | λ={lam_h:.2f}-{lam_a:.2f}
 """
-
     try:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -1200,7 +1247,6 @@ def build_top_tips(
 def main():
     now_local = datetime.now(LOCAL_TZ)
 
-    # init session
     if "is_premium" not in st.session_state:
         st.session_state["is_premium"] = False
     if "is_admin" not in st.session_state:
@@ -1211,7 +1257,6 @@ def main():
     # VIP refresh (auto-expiração)
     vip_refresh_from_supabase()
 
-    # Header
     st.markdown(
         f"""
 <div class="barca-header">
@@ -1241,13 +1286,21 @@ def main():
     with st.sidebar:
         st.subheader("Acesso")
 
+        # Estado + contador VIP
         if is_admin():
             st.markdown("<span class='admin-pill'>ADMIN ATIVO</span>", unsafe_allow_html=True)
+            st.markdown("<div class='ok-box'><b>Admin:</b> acesso total (ilimitado).</div>", unsafe_allow_html=True)
         elif is_premium():
             exp = st.session_state.get("vip_expires_at")
-            exp_txt = exp.strftime("%d/%m %H:%M") if exp else "-"
-            st.markdown("<span class='premium-pill'>Modo: VIP</span>", unsafe_allow_html=True)
-            st.caption(f"Expira: {exp_txt} (Moçambique)")
+            if exp:
+                rem = exp - now_local
+                st.markdown("<span class='premium-pill'>Modo: VIP</span>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<div class='ok-box'><b>VIP ativo.</b><br>Expira: {exp.strftime('%d/%m/%Y %H:%M')}<br>Faltam: <b>{fmt_countdown(rem)}</b></div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown("<span class='premium-pill'>Modo: VIP</span>", unsafe_allow_html=True)
         else:
             st.markdown("<span class='free-pill'>Modo: FREE</span>", unsafe_allow_html=True)
 
@@ -1262,6 +1315,7 @@ def main():
                     st.session_state["is_admin"] = True
                     st.session_state["is_premium"] = True
                     st.success("Acesso Admin ativo.")
+                    st.rerun()
                 else:
                     st.error("Senha inválida.")
             except Exception:
@@ -1285,6 +1339,11 @@ def main():
             elif is_premium():
                 st.success("VIP ativo. Não precisa pagar agora.")
             else:
+                fp = _fingerprint()
+
+                # Anti-spam: detecta pendente e bloqueia UI
+                has_pending = vip_has_pending_request(fp)
+
                 st.markdown(
                     f"""
 <div class="warn-box">
@@ -1292,22 +1351,32 @@ def main():
 • M-Pesa: <b>{MPESA_NUMBER}</b><br>
 • e-Mola: <b>{EMOLA_NUMBER}</b><br>
 Nome: <b>{PAYMENT_NAME}</b><br><br>
-Depois de pagar <b>{VIP_PRICE_MT} MT</b>, envie a referência/ID aqui para aprovação.
+Depois de pagar <b>{VIP_PRICE_MT} MT</b>, envie a referência/ID aqui para aprovação.<br>
+<span class="small">Seu código (user_fp): <b>{fp}</b></span>
 </div>
 """,
                     unsafe_allow_html=True,
                 )
 
-                via = st.selectbox("Via", ["mpesa", "emola"], index=0)
-                txid = st.text_input("Referência/Transação (ID)", placeholder="Ex: MP1234ABC...")
-                email = st.text_input("Seu email (opcional)", value=str(st.secrets.get("CONTACT_EMAIL", "")) or "")
-                if st.button("Enviar para aprovação (VIP)"):
+                if has_pending:
+                    st.markdown(
+                        "<div class='danger-box'><b>Já existe um pedido pendente.</b><br>Aguarde aprovação ou peça ao Admin para rejeitar/aprovar.</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                via = st.selectbox("Via", ["mpesa", "emola"], index=0, disabled=has_pending)
+                txid = st.text_input("Referência/Transação (ID)", placeholder="Ex: MP1234ABC...", disabled=has_pending)
+                email = st.text_input("Seu email (opcional)", value=str(st.secrets.get("CONTACT_EMAIL", "")) or "", disabled=has_pending)
+
+                if st.button("Enviar para aprovação (VIP)", disabled=has_pending):
                     req = vip_request_submit(via=via, txid=txid, email=email)
-                    if req:
+
+                    if isinstance(req, dict) and req.get("_blocked"):
+                        st.error("Bloqueado: já existe pedido pendente.")
+                    elif req:
                         st.success("Pedido enviado. Aguarde aprovação do Admin.")
 
-                        # WhatsApp automático com mensagem pronta
-                        fp = _fingerprint()
+                        # WhatsApp automático com texto pronto
                         msg = (
                             f"Olá Nzualo, paguei o VIP semanal ({VIP_PRICE_MT} MT / {VIP_DAYS} dias).\n"
                             f"Via: {via}\n"
@@ -1317,15 +1386,35 @@ Depois de pagar <b>{VIP_PRICE_MT} MT</b>, envie a referência/ID aqui para aprov
                             f"Por favor, aprovar no painel."
                         )
                         wa_link = f"https://wa.me/{WHATSAPP_ADMIN}?text={quote_plus(msg)}"
-                        st.markdown(f"➡️ Enviar no WhatsApp automaticamente: {wa_link}")
+                        st.markdown(f"➡️ WhatsApp automático: {wa_link}")
+                        st.rerun()
                     else:
-                        st.error("Não foi possível enviar. Verifique a via e o ID, ou o Supabase.")
+                        st.error("Não foi possível enviar. Verifique a via, o ID, ou o Supabase.")
 
-                # status do último pedido
+                # Status e histórico
                 last = vip_request_status_for_user()
                 if last:
                     st.markdown("**Último pedido:**")
                     st.json(last)
+
+                with st.expander("Histórico (últimos 10)"):
+                    hist = vip_request_history_for_user(limit=10)
+                    if not hist:
+                        st.info("Sem histórico ainda.")
+                    else:
+                        st.table(
+                            [
+                                {
+                                    "data": (r.get("created_at") or "")[:19],
+                                    "via": r.get("via"),
+                                    "id": r.get("txid"),
+                                    "valor": r.get("amount_mt"),
+                                    "status": r.get("status"),
+                                    "nota": r.get("admin_note") or "",
+                                }
+                                for r in hist
+                            ]
+                        )
 
         st.markdown("---")
 
@@ -1358,7 +1447,6 @@ Depois de pagar <b>{VIP_PRICE_MT} MT</b>, envie a referência/ID aqui para aprov
         st.subheader("IA")
         ai_enabled = st.checkbox("Ativar IA para explicar picks", value=True)
 
-        # IA: VIP/Admin
         if (not is_premium()) and ai_enabled:
             ai_enabled = False
             st.info("IA é recurso VIP (ou Admin).")
@@ -1383,7 +1471,6 @@ Depois de pagar <b>{VIP_PRICE_MT} MT</b>, envie a referência/ID aqui para aprov
         else:
             st.caption("Aprovar pedidos pendentes e gerir VIP. VIP dura 7 dias e expira automaticamente.")
 
-            # Pendentes
             st.markdown("### Pedidos pendentes")
             pending = admin_list_pending_requests(limit=50)
             if not pending:
