@@ -1,5 +1,5 @@
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Dict, List, Optional, Tuple
 
 import pytz
@@ -10,8 +10,10 @@ import streamlit as st
 # CONFIG
 # =============================
 LOCAL_TZ = pytz.timezone("Africa/Maputo")
-API_BASE = "https://v3.football.api-sports.io"
 MAX_LEAGUES_DEFAULT = 20
+
+# AllSportsAPI
+ALLSPORTS_BASE = "https://apiv2.allsportsapi.com/football/"
 
 st.set_page_config(page_title="Melhores Palpites do Dia", layout="wide")
 
@@ -54,7 +56,7 @@ st.markdown(
 )
 
 # =============================
-# API Helpers
+# Secrets / Provider
 # =============================
 def _get_secret(name: str, default: Optional[str] = None) -> str:
     v = st.secrets.get(name, default)
@@ -62,68 +64,209 @@ def _get_secret(name: str, default: Optional[str] = None) -> str:
         raise RuntimeError(f"Missing secret: {name}")
     return str(v)
 
+def provider_mode() -> str:
+    return str(st.secrets.get("FOOTBALL_API_MODE", "allsports")).lower().strip()
 
-def _football_headers() -> Dict[str, str]:
-    api_key = _get_secret("FOOTBALL_API_KEY")
-    mode = st.secrets.get("FOOTBALL_API_MODE", "apisports").lower().strip()
-    if mode == "rapidapi":
-        host = st.secrets.get("FOOTBALL_RAPIDAPI_HOST", "v3.football.api-sports.io")
-        return {"x-rapidapi-key": api_key, "x-rapidapi-host": host}
-    return {"x-apisports-key": api_key}
-
-
-def api_get(path: str, params: Dict[str, str], timeout: int = 12) -> Dict:
+# =============================
+# AllSportsAPI low-level
+# =============================
+def allsports_get(met: str, params: Dict[str, str], timeout: int = 15) -> Dict:
+    """
+    AllSportsAPI V2:
+      GET https://apiv2.allsportsapi.com/football/?met=...&APIkey=...&...
+    """
+    apikey = _get_secret("ALLSPORTS_API_KEY")
+    q = {"met": met, "APIkey": apikey}
+    q.update(params or {})
     try:
-        r = requests.get(f"{API_BASE}{path}", headers=_football_headers(), params=params, timeout=timeout)
+        r = requests.get(ALLSPORTS_BASE, params=q, timeout=timeout)
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+        return data if isinstance(data, dict) else {"success": 0, "result": None, "errors": "Non-dict response"}
     except Exception as e:
-        return {"response": [], "errors": {"request": str(e)}}
+        return {"success": 0, "result": None, "errors": str(e)}
 
+# =============================
+# Normalização (AllSports -> estrutura parecida com teu código original)
+# =============================
+def _as_int(x) -> Optional[int]:
+    try:
+        if x is None: return None
+        return int(str(x))
+    except Exception:
+        return None
 
+def _parse_allsports_dt_local(ev: Dict) -> Optional[datetime]:
+    """
+    AllSports devolve event_date 'YYYY-MM-DD' e event_time 'HH:MM' (quando timezone é passado).
+    """
+    try:
+        d = ev.get("event_date")
+        t = ev.get("event_time") or "00:00"
+        dt = datetime.fromisoformat(f"{d} {t}")
+        return LOCAL_TZ.localize(dt)
+    except Exception:
+        return None
+
+def _normalize_fixture_allsports(ev: Dict) -> Optional[Dict]:
+    """
+    Converte evento AllSports em estrutura compatível com o resto do app.
+    """
+    try:
+        fx_id = _as_int(ev.get("event_key") or ev.get("match_id") or ev.get("event_id"))
+        league_id = _as_int(ev.get("league_key"))
+        home_id = _as_int(ev.get("home_team_key"))
+        away_id = _as_int(ev.get("away_team_key"))
+        if not (fx_id and league_id and home_id and away_id):
+            return None
+
+        dt_local = _parse_allsports_dt_local(ev)
+        # ISO fake para manter parse_fixture_time_local simples
+        iso = dt_local.astimezone(pytz.UTC).isoformat() if dt_local else None
+
+        # status: finished/live/etc
+        status_txt = (ev.get("event_status") or "").lower()
+        # tentativas comuns: "Finished", "Postponed", "Not Started"
+        # vamos mapear de forma simples
+        if "finish" in status_txt:
+            short = "FT"
+        elif "not" in status_txt and "start" in status_txt:
+            short = "NS"
+        else:
+            short = ev.get("event_status") or "NS"
+
+        return {
+            "fixture": {
+                "id": fx_id,
+                "date": (iso or ""),
+                "status": {"short": short},
+            },
+            "league": {"id": league_id, "name": ev.get("league_name") or "Liga"},
+            "teams": {
+                "home": {"id": home_id, "name": ev.get("event_home_team") or "Home"},
+                "away": {"id": away_id, "name": ev.get("event_away_team") or "Away"},
+            },
+            "goals": {
+                "home": _as_int(ev.get("event_home_final_result")) if ev.get("event_home_final_result") else None,
+                "away": _as_int(ev.get("event_away_final_result")) if ev.get("event_away_final_result") else None,
+            },
+            "_raw": ev,
+        }
+    except Exception:
+        return None
+
+# =============================
+# Data access (AllSports)
+# =============================
 @st.cache_data(ttl=60 * 10)
 def get_fixtures_by_date(date_yyyy_mm_dd: str) -> List[Dict]:
-    data = api_get("/fixtures", {"date": date_yyyy_mm_dd})
-    return data.get("response", []) or []
+    """
+    Puxa jogos do dia usando AllSportsAPI met=Fixtures&from=...&to=...&timezone=Africa/Maputo
+    """
+    if provider_mode() != "allsports":
+        return []
 
+    data = allsports_get("Fixtures", {
+        "from": date_yyyy_mm_dd,
+        "to": date_yyyy_mm_dd,
+        "timezone": "Africa/Maputo",
+    })
+    if str(data.get("success")) != "1":
+        return []
+
+    res = data.get("result") or []
+    out = []
+    for ev in res:
+        fx = _normalize_fixture_allsports(ev)
+        if fx:
+            out.append(fx)
+    return out
 
 @st.cache_data(ttl=60 * 60 * 2)
 def get_last_team_fixtures(team_id: int, last: int = 10, status: str = "FT") -> List[Dict]:
-    data = api_get("/fixtures", {"team": str(team_id), "last": str(last), "status": status})
-    return data.get("response", []) or []
+    """
+    AllSports não tem 'last=N' igual API-FOOTBALL; fazemos por janela (últimos 120 dias)
+    e filtramos os terminados.
+    """
+    if provider_mode() != "allsports":
+        return []
 
+    today = datetime.now(LOCAL_TZ).date()
+    start = today - timedelta(days=120)
+
+    data = allsports_get("Fixtures", {
+        "teamId": str(team_id),
+        "from": start.strftime("%Y-%m-%d"),
+        "to": today.strftime("%Y-%m-%d"),
+        "timezone": "Africa/Maputo",
+    })
+    if str(data.get("success")) != "1":
+        return []
+
+    res = data.get("result") or []
+    norm = []
+    for ev in res:
+        fx = _normalize_fixture_allsports(ev)
+        if not fx:
+            continue
+        # filtra FT
+        st_short = (fx.get("fixture", {}).get("status", {}) or {}).get("short", "")
+        if status == "FT" and st_short != "FT":
+            continue
+        norm.append(fx)
+
+    # ordenar por data desc
+    def _dt_key(x):
+        dt = parse_fixture_time_local(x)
+        return dt.timestamp() if dt else 0.0
+
+    norm.sort(key=_dt_key, reverse=True)
+    return norm[:last]
 
 @st.cache_data(ttl=60 * 10)
-def get_odds_for_fixture(fixture_id: int, bookmaker: int = 8) -> List[Dict]:
-    data = api_get("/odds", {"fixture": str(fixture_id), "bookmaker": str(bookmaker)})
-    return data.get("response", []) or []
+def get_odds_for_fixture(fixture_id: int, bookmaker: int = 0) -> Dict:
+    """
+    AllSports Odds retorna um dicionário result: {matchId: [ {odd_1, odd_x, odd_2, odd_1x, odd_x2, odd_12, o+1.5, o+2.5, bts_yes, ...}, ... ] }
+    """
+    if provider_mode() != "allsports":
+        return {}
 
+    data = allsports_get("Odds", {"matchId": str(fixture_id)})
+    if str(data.get("success")) != "1":
+        return {}
+
+    result = data.get("result") or {}
+    # result pode vir como dict com chave matchId string
+    row_list = result.get(str(fixture_id)) if isinstance(result, dict) else None
+    if not row_list:
+        return {}
+    # usa o primeiro bookmaker disponível
+    return row_list[0] if isinstance(row_list, list) and row_list else {}
 
 # =============================
-# Time parsing
+# Time parsing (mantido)
 # =============================
 def parse_fixture_time_local(fx: Dict) -> Optional[datetime]:
     try:
         iso = fx["fixture"]["date"]
+        if not iso:
+            return None
         dt_utc = datetime.fromisoformat(iso.replace("Z", "+00:00"))
         return dt_utc.astimezone(LOCAL_TZ)
     except Exception:
         return None
 
-
 def is_future_fixture(fx: Dict, now_local: datetime) -> bool:
     dt = parse_fixture_time_local(fx)
     return bool(dt and dt > now_local)
 
-
 # =============================
-# Poisson Model
+# Poisson Model (mantido)
 # =============================
 def poisson_pmf(k: int, lam: float) -> float:
     if lam <= 0:
         return 0.0
     return math.exp(-lam) * (lam ** k) / math.factorial(k)
-
 
 def prob_over_total(lam_home: float, lam_away: float, line: float, max_goals: int = 10) -> float:
     threshold = math.floor(line)
@@ -136,12 +279,10 @@ def prob_over_total(lam_home: float, lam_away: float, line: float, max_goals: in
                 p_le += ph * pa
     return max(0.0, min(1.0, 1.0 - p_le))
 
-
 def prob_btts(lam_home: float, lam_away: float) -> float:
     p_home0 = poisson_pmf(0, lam_home)
     p_away0 = poisson_pmf(0, lam_away)
     return max(0.0, min(1.0, 1.0 - p_home0 - p_away0 + (p_home0 * p_away0)))
-
 
 def prob_1x2(lam_home: float, lam_away: float, max_goals: int = 10) -> Tuple[float, float, float]:
     pH = pD = pA = 0.0
@@ -160,16 +301,13 @@ def prob_1x2(lam_home: float, lam_away: float, max_goals: int = 10) -> Tuple[flo
         pH, pD, pA = pH / s, pD / s, pA / s
     return pH, pD, pA
 
-
 def fair_odds(p: float) -> Optional[float]:
     if p <= 0:
         return None
     return 1.0 / p
 
-
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
-
 
 def compute_team_form(team_id: int, fixtures_ft: List[Dict]) -> Tuple[int, float, float, float, float, float, float]:
     gf = ga = 0
@@ -219,7 +357,6 @@ def compute_team_form(team_id: int, fixtures_ft: List[Dict]) -> Tuple[int, float
 
     return n, gf_pg, ga_pg, gf_home_pg, ga_home_pg, gf_away_pg, ga_away_pg
 
-
 def estimate_lambdas(home_form, away_form, home_adv: float = 1.08) -> Tuple[float, float, str]:
     base = 1.25
     nH, gfH, gaH, gfH_home, gaH_home, gfH_away, gaH_away = home_form
@@ -250,33 +387,45 @@ def estimate_lambdas(home_form, away_form, home_adv: float = 1.08) -> Tuple[floa
 
     return clamp(lam_home, 0.2, 3.5), clamp(lam_away, 0.2, 3.5), ev
 
+# =============================
+# Odds mapping (AllSports)
+# =============================
+def odds_allsports_market(odds_row: Dict, market: str) -> Optional[float]:
+    """
+    Converte teus mercados para chaves do AllSports:
+      1X2: odd_1 / odd_x / odd_2
+      DC: odd_1x / odd_x2 / odd_12
+      Over: o+1.5 / o+2.5
+      BTTS: bts_yes
+    """
+    if not odds_row:
+        return None
 
-# =============================
-# Odds parsing
-# =============================
-def _extract_market_odds(odds_response: List[Dict], market_keywords: List[str], selection_keywords: List[str]) -> Optional[float]:
     try:
-        if not odds_response:
-            return None
-        item = odds_response[0]
-        for bk in item.get("bookmakers", []):
-            for bet in bk.get("bets", []):
-                bet_name = (bet.get("name") or "").lower()
-                if all(k.lower() in bet_name for k in market_keywords):
-                    for v in bet.get("values", []):
-                        vname = (v.get("value") or "").lower()
-                        if all(sk.lower() in vname for sk in selection_keywords):
-                            odd = v.get("odd")
-                            if odd is None:
-                                continue
-                            return float(odd)
+        def f(key: str) -> Optional[float]:
+            v = odds_row.get(key)
+            if v is None or v == "":
+                return None
+            return float(v)
+
+        if market == "odd_1": return f("odd_1")
+        if market == "odd_x": return f("odd_x")
+        if market == "odd_2": return f("odd_2")
+
+        if market == "odd_1x": return f("odd_1x")
+        if market == "odd_x2": return f("odd_x2")
+        if market == "odd_12": return f("odd_12")
+
+        if market == "o+1.5": return f("o+1.5")
+        if market == "o+2.5": return f("o+2.5")
+
+        if market == "bts_yes": return f("bts_yes")
         return None
     except Exception:
         return None
 
-
 # =============================
-# Fixture filtering
+# Fixture filtering to MAX 20 leagues (mantido)
 # =============================
 def limit_to_top_leagues(fixtures: List[Dict], max_leagues: int) -> List[Dict]:
     league_counts: Dict[int, int] = {}
@@ -290,9 +439,8 @@ def limit_to_top_leagues(fixtures: List[Dict], max_leagues: int) -> List[Dict]:
     top_set = set(top_ids)
     return [fx for fx in fixtures if int(fx.get("league", {}).get("id", -1)) in top_set]
 
-
 # =============================
-# Picks builder (por mercado)
+# Picks builder (mantido, trocando apenas odds)
 # =============================
 def build_picks_for_market(
     fixtures: List[Dict],
@@ -335,7 +483,7 @@ def build_picks_for_market(
             away_form = compute_team_form(away_id, away_last)
             lam_h, lam_a, ev = estimate_lambdas(home_form, away_form, home_adv=home_adv)
 
-            odds_resp = get_odds_for_fixture(fixture_id, bookmaker=bookmaker)
+            odds_row = get_odds_for_fixture(fixture_id, bookmaker=bookmaker)
 
             dt_local = parse_fixture_time_local(fx)
             time_str = dt_local.strftime("%H:%M") if dt_local else "??:??"
@@ -357,33 +505,32 @@ def build_picks_for_market(
                     "ev": ev,
                     "lam": (lam_h, lam_a),
                     "fixture_id": fixture_id,
-                    "market": market,
                 })
                 used_leagues.add(league_id)
 
             if market == "Over 1.5":
                 p = prob_over_total(lam_h, lam_a, 1.5)
-                odd = _extract_market_odds(odds_resp, ["goals over/under"], ["over 1.5"])
+                odd = odds_allsports_market(odds_row, "o+1.5")
                 if odd and odd >= min_odd:
                     push("Over 1.5", p, odd)
 
             elif market == "Over 2.5":
                 p = prob_over_total(lam_h, lam_a, 2.5)
-                odd = _extract_market_odds(odds_resp, ["goals over/under"], ["over 2.5"])
+                odd = odds_allsports_market(odds_row, "o+2.5")
                 if odd and odd >= min_odd:
                     push("Over 2.5", p, odd)
 
             elif market == "BTTS":
                 p = prob_btts(lam_h, lam_a)
-                odd = _extract_market_odds(odds_resp, ["both teams score"], ["yes"])
+                odd = odds_allsports_market(odds_row, "bts_yes")
                 if odd and odd >= min_odd:
                     push("BTTS (Yes)", p, odd)
 
             elif market == "1X2":
                 pH, pD, pA = prob_1x2(lam_h, lam_a)
-                odd_home = _extract_market_odds(odds_resp, ["match winner"], ["home"])
-                odd_draw = _extract_market_odds(odds_resp, ["match winner"], ["draw"])
-                odd_away = _extract_market_odds(odds_resp, ["match winner"], ["away"])
+                odd_home = odds_allsports_market(odds_row, "odd_1")
+                odd_draw = odds_allsports_market(odds_row, "odd_x")
+                odd_away = odds_allsports_market(odds_row, "odd_2")
 
                 candidates = []
                 if odd_home and odd_home >= min_odd:
@@ -411,16 +558,16 @@ def build_picks_for_market(
             elif market in ("DC+Over1.5", "DC+Over2.5"):
                 line = 1.5 if market == "DC+Over1.5" else 2.5
                 p_over = prob_over_total(lam_h, lam_a, line)
-                odd_over = _extract_market_odds(odds_resp, ["goals over/under"], [f"over {line}"])
+                odd_over = odds_allsports_market(odds_row, "o+1.5" if line == 1.5 else "o+2.5")
                 if not odd_over or odd_over < min_odd:
                     continue
 
                 pH, pD, pA = prob_1x2(lam_h, lam_a)
                 p_1x, p_x2, p_12 = pH + pD, pA + pD, pH + pA
 
-                odd_1x = _extract_market_odds(odds_resp, ["double chance"], ["home/draw"]) or _extract_market_odds(odds_resp, ["double chance"], ["1x"])
-                odd_x2 = _extract_market_odds(odds_resp, ["double chance"], ["draw/away"]) or _extract_market_odds(odds_resp, ["double chance"], ["x2"])
-                odd_12 = _extract_market_odds(odds_resp, ["double chance"], ["home/away"]) or _extract_market_odds(odds_resp, ["double chance"], ["12"])
+                odd_1x = odds_allsports_market(odds_row, "odd_1x")
+                odd_x2 = odds_allsports_market(odds_row, "odd_x2")
+                odd_12 = odds_allsports_market(odds_row, "odd_12")
 
                 for dc_name, p_dc, odd_dc in [("1X", p_1x, odd_1x), ("X2", p_x2, odd_x2), ("12", p_12, odd_12)]:
                     if not odd_dc or odd_dc < min_odd:
@@ -432,9 +579,9 @@ def build_picks_for_market(
 
             elif market == "Zebras":
                 pH, pD, pA = prob_1x2(lam_h, lam_a)
-                odd_home = _extract_market_odds(odds_resp, ["match winner"], ["home"])
-                odd_draw = _extract_market_odds(odds_resp, ["match winner"], ["draw"])
-                odd_away = _extract_market_odds(odds_resp, ["match winner"], ["away"])
+                odd_home = odds_allsports_market(odds_row, "odd_1")
+                odd_draw = odds_allsports_market(odds_row, "odd_x")
+                odd_away = odds_allsports_market(odds_row, "odd_2")
 
                 zebra_candidates = []
                 if odd_home and odd_home >= zebra_min_odd:
@@ -476,7 +623,6 @@ def build_picks_for_market(
 
     return picks
 
-
 def render_picks(picks: List[Dict]):
     if not picks:
         st.info("Sem picks que passem nos filtros (ou odds indisponíveis).")
@@ -502,73 +648,6 @@ def render_picks(picks: List[Dict]):
 """,
             unsafe_allow_html=True,
         )
-
-
-# =============================
-# TOP PICKS (6-10 misturados)
-# =============================
-def build_top_picks(
-    fixtures: List[Dict],
-    last_n_form: int,
-    home_adv: float,
-    min_odd: float,
-    zebra_min_odd: float,
-    bookmaker: int,
-    top_n: int,
-) -> List[Dict]:
-    markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5", "Zebras"]
-
-    pbar = st.progress(0)
-    ptxt = st.empty()
-
-    all_candidates: List[Dict] = []
-
-    for i, m in enumerate(markets, start=1):
-        pbar.progress(int((i - 1) * 100 / len(markets)))
-        ptxt.markdown(f"<div class='ptext'>A gerar candidatos: {m} ({i}/{len(markets)})...</div>", unsafe_allow_html=True)
-
-        st.session_state["_show_progress"] = False  # evita múltiplas barras
-
-        cand = build_picks_for_market(
-            fixtures=fixtures,
-            market=m,
-            last_n_form=last_n_form,
-            home_adv=home_adv,
-            one_per_league=False,          # <- globalmente filtramos depois
-            min_odd=min_odd,
-            zebra_min_odd=zebra_min_odd,
-            max_picks=25,
-            bookmaker=bookmaker,
-        )
-        all_candidates.extend(cand)
-
-    pbar.progress(100)
-    ptxt.markdown("<div class='ptext'>A selecionar Top Picks finais...</div>", unsafe_allow_html=True)
-
-    ev_rank = {"ALTA": 2, "MÉDIA": 1, "BAIXA": 0}
-    all_candidates = sorted(
-        all_candidates,
-        key=lambda x: (
-            -999 if x.get("edge") is None else -x["edge"],
-            -x.get("prob", 0.0),
-            -ev_rank.get(x.get("ev", "BAIXA"), 0),
-        ),
-    )
-
-    final: List[Dict] = []
-    used_leagues = set()
-    for c in all_candidates:
-        lid = c.get("league_id")
-        if lid in used_leagues:
-            continue
-        final.append(c)
-        used_leagues.add(lid)
-        if len(final) >= top_n:
-            break
-
-    ptxt.markdown("<div class='ptext'>Concluído.</div>", unsafe_allow_html=True)
-    return final
-
 
 # =============================
 # MAIN
@@ -605,29 +684,26 @@ def main():
         st.subheader("Configuração")
         auto_tomorrow_if_empty = st.checkbox("Se hoje não tiver jogos futuros, usar amanhã", value=True)
 
-        top_picks_n = st.slider("Top Picks do Dia (6 a 10)", 6, 10, 8, 1)
-
         max_picks = st.slider("Top picks por aba", 5, 20, 10, 1)
-        one_per_league = st.checkbox("1 pick por liga (em cada aba)", value=True)
+        one_per_league = st.checkbox("1 pick por liga", value=True)
         max_leagues = st.slider("Máx. ligas/campeonatos", 5, 30, MAX_LEAGUES_DEFAULT, 1)
 
         last_n_form = st.slider("Forma (últimos jogos FT)", 4, 20, 10, 1)
         home_adv = st.slider("Vantagem de casa", 1.00, 1.20, 1.08, 0.01)
 
-        bookmaker = st.number_input("Bookmaker ID (odds)", value=8, min_value=1, step=1)
         min_odd = st.number_input("Odd mínima (normais)", value=1.30, min_value=1.01, step=0.01)
         zebra_min_odd = st.number_input("Odd mínima (zebras)", value=4.00, min_value=2.00, step=0.10)
 
         debug = st.checkbox("Mostrar diagnóstico (debug)", value=False)
 
-    # --- Fixtures hoje (futuros) ---
+    # Fixtures hoje (futuros)
     date_to_use = now_local.date()
     date_str = date_to_use.strftime("%Y-%m-%d")
     fixtures_raw = get_fixtures_by_date(date_str)
     fixtures = [fx for fx in fixtures_raw if is_future_fixture(fx, now_local)]
 
-    # --- Amanhã se vazio ---
-    if not fixtures and auto_tomorrow_if_empty:
+    # Amanhã se: hoje tinha fixtures brutos, mas nenhum futuro
+    if auto_tomorrow_if_empty and (len(fixtures_raw) > 0) and (len(fixtures) == 0):
         date_to_use = (now_local + timedelta(days=1)).date()
         date_str = date_to_use.strftime("%Y-%m-%d")
         fixtures_raw = get_fixtures_by_date(date_str)
@@ -635,65 +711,40 @@ def main():
 
     if debug:
         with st.expander("Diagnóstico (fixtures/tempo)"):
+            st.write("Provider:", provider_mode())
             st.write("Data usada:", date_str)
             st.write("Agora (local):", now_local.isoformat())
             st.write("Fixtures brutos:", len(fixtures_raw))
             st.write("Fixtures após filtro:", len(fixtures))
-            if fixtures_raw:
+            if len(fixtures_raw) == 0:
+                st.warning("A API devolveu 0 fixtures para esta data. Verifique plano/cobertura/limite.")
+            else:
                 s = parse_fixture_time_local(fixtures_raw[0])
                 st.write("Exemplo 1º fixture (hora local):", s.isoformat() if s else None)
                 st.write("Exemplo league:", fixtures_raw[0].get("league", {}).get("name"))
-            else:
-                st.warning("API retornou 0 fixtures (quota, chave errada, ou data sem jogos).")
 
-    # Limita ligas (se houver jogos)
-    if fixtures:
-        fixtures = limit_to_top_leagues(fixtures, max_leagues=max_leagues)
+    if not fixtures:
+        st.error("Nenhum jogo encontrado (ou odds indisponíveis).")
+        return
+
+    fixtures = limit_to_top_leagues(fixtures, max_leagues=max_leagues)
 
     st.markdown(
         f"🗓️ Data analisada: <span class='badge'>{date_to_use.strftime('%d/%m/%Y')}</span>",
         unsafe_allow_html=True,
     )
-    st.caption(f"Jogos carregados (após filtros): {len(fixtures)} | Máx. ligas: {max_leagues}")
+    st.caption(f"Jogos carregados (após limite de ligas): {len(fixtures)} | Máx. ligas: {max_leagues}")
 
-    # ✅ Abas SEMPRE visíveis + Top Picks incluída
-    tabs = st.tabs(
-        ["⭐ Top Picks", "🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "👥 DC+O1.5", "👥 DC+O2.5", "🟣 Zebras"]
-    )
-
-    # ====== ABA TOP PICKS ======
-    with tabs[0]:
-        st.subheader("⭐ Top Picks do Dia (misturados)")
-        st.caption("Mistura mercados e escolhe 6–10 melhores no geral, com 1 pick por liga.")
-
-        disabled = (len(fixtures) == 0)
-        if st.button(f"🚀 Gerar Top Picks ({top_picks_n})", key="btn_top", disabled=disabled):
-            picks = build_top_picks(
-                fixtures=fixtures,
-                last_n_form=last_n_form,
-                home_adv=home_adv,
-                min_odd=min_odd,
-                zebra_min_odd=zebra_min_odd,
-                bookmaker=bookmaker,
-                top_n=top_picks_n,
-            )
-            st.session_state["picks_TOP"] = picks
-
-        if disabled:
-            st.warning("Sem jogos para analisar agora. Ative 'usar amanhã' ou verifique a API/odds.")
-        render_picks(st.session_state.get("picks_TOP", []))
-
-    # ====== OUTRAS ABAS ======
+    tabs = st.tabs(["🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "👥 DC+O1.5", "👥 DC+O2.5", "🟣 Zebras"])
     markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5", "Zebras"]
-    for tab, market in zip(tabs[1:], markets):
+
+    for tab, market in zip(tabs, markets):
         with tab:
             st.subheader(f"Mercado: {market}")
 
-            disabled = (len(fixtures) == 0)
-
             col1, col2 = st.columns([1, 2])
             with col1:
-                if st.button(f"🚀 Gerar Top {max_picks}", key=f"btn_{market}", disabled=disabled):
+                if st.button(f"🚀 Gerar Top {max_picks}", key=f"btn_{market}"):
                     st.session_state["_show_progress"] = True
                     try:
                         picks = build_picks_for_market(
@@ -705,7 +756,7 @@ def main():
                             min_odd=min_odd,
                             zebra_min_odd=zebra_min_odd,
                             max_picks=max_picks,
-                            bookmaker=bookmaker,
+                            bookmaker=0,
                         )
                         st.session_state[f"picks_{market}"] = picks
                     finally:
@@ -714,13 +765,10 @@ def main():
             with col2:
                 st.write(
                     "Critérios: odds mínimas + ranking por edge (odd mercado vs odd justa do modelo). "
-                    "Se não aparecerem picks, o feed de odds pode não ter linhas para esse mercado/jogo."
+                    "Se não aparecerem picks, pode ser falta de odds para esse jogo/mercado no AllSports."
                 )
 
-            if disabled:
-                st.warning("Sem jogos para analisar agora. Ative 'usar amanhã' ou verifique a API/odds.")
             render_picks(st.session_state.get(f"picks_{market}", []))
-
 
 if __name__ == "__main__":
     main()
