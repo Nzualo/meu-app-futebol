@@ -1,15 +1,8 @@
-# COLE ESTE CÓDIGO INTEIRO NO SEU app.py PARA TESTAR ODDS (DEBUG)
-# Ele inclui:
-# - Seu design (título, assinatura, WhatsApp, relógio com segundos)
-# - Abas com botão "Gerar Top N"
-# - Barra de progresso ao gerar
-# - DEBUG: botão "TESTAR ODDS AGORA" que mostra o JSON real do /odds
-#
-# Requisitos:
-# secrets.toml:
-# FOOTBALL_API_KEY="..."
-# FOOTBALL_API_MODE="apisports"  # ou "rapidapi"
-# (opcional) FOOTBALL_RAPIDAPI_HOST="v3.football.api-sports.io"
+# app.py — versão completa para você colar
+# Corrige o "pisca" do Debug/TESTAR ODDS com autorefresh:
+# - pausa o autorefresh enquanto testa odds (e mantém resultado em session_state)
+# - inclui botão "RETOMAR RELÓGIO"
+# - mantém design, WhatsApp, assinatura, abas, botão Gerar com barra de progresso
 
 import math
 import time
@@ -28,6 +21,21 @@ try:
     HAS_AUTOREFRESH = True
 except Exception:
     HAS_AUTOREFRESH = False
+
+# =============================
+# SESSION STATE (anti-piscar)
+# =============================
+if "pause_refresh" not in st.session_state:
+    st.session_state["pause_refresh"] = False
+
+if "debug_odds_raw" not in st.session_state:
+    st.session_state["debug_odds_raw"] = None
+
+if "debug_odds_summary" not in st.session_state:
+    st.session_state["debug_odds_summary"] = None
+
+if "debug_extract_test" not in st.session_state:
+    st.session_state["debug_extract_test"] = None
 
 # =============================
 # CONFIG
@@ -129,12 +137,18 @@ a.whatsapp {
   background: rgba(0,255,0,0.16);
   color: #eaffea;
 }
-a.whatsapp:hover {
-  background: rgba(0,255,0,0.24);
-}
+a.whatsapp:hover { background: rgba(0,255,0,0.24); }
 
 /* Tabs spacing */
 div[data-baseweb="tab-list"] { gap: 6px; }
+
+/* Debug box (visual) */
+.debugbox {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 12px;
+  padding: 10px;
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -523,13 +537,15 @@ def build_picks_for_market(
                     continue
 
                 pH, pD, pA = prob_1x2(lam_h, lam_a)
-                p_1x, p_x2, p_12 = pH + pD, pA + pD, pH + pA
-
                 odd_1x = _extract_market_odds(odds_resp, ["double chance"], ["home/draw"]) or _extract_market_odds(odds_resp, ["double chance"], ["1x"])
                 odd_x2 = _extract_market_odds(odds_resp, ["double chance"], ["draw/away"]) or _extract_market_odds(odds_resp, ["double chance"], ["x2"])
                 odd_12 = _extract_market_odds(odds_resp, ["double chance"], ["home/away"]) or _extract_market_odds(odds_resp, ["double chance"], ["12"])
 
-                for dc_name, p_dc, odd_dc in [("1X", pH + pD, odd_1x), ("X2", pA + pD, odd_x2), ("12", pH + pA, odd_12)]:
+                for dc_name, p_dc, odd_dc in [
+                    ("1X", pH + pD, odd_1x),
+                    ("X2", pA + pD, odd_x2),
+                    ("12", pH + pA, odd_12),
+                ]:
                     if not odd_dc or odd_dc < min_odd:
                         continue
                     p_combo = clamp(p_dc * p_over, 0.0, 1.0)
@@ -585,6 +601,7 @@ def render_picks(picks: List[Dict]):
     if not picks:
         st.info("Sem picks que passem nos filtros (ou odds indisponíveis).")
         return
+
     for p in picks:
         edge = p.get("edge")
         edge_txt = f"{edge*100:.1f}%" if edge is not None else "n/a"
@@ -612,9 +629,9 @@ def render_picks(picks: List[Dict]):
 # MAIN
 # =============================
 def main():
-    # clock refresh
-    if HAS_AUTOREFRESH:
-        st_autorefresh(interval=1000, key="clock")
+    # Autorefresh só se não estiver pausado
+    if HAS_AUTOREFRESH and not st.session_state["pause_refresh"]:
+        st_autorefresh(interval=1000, key="clock")  # 1s
     else:
         time.sleep(0.01)
 
@@ -631,6 +648,7 @@ def main():
   <div class="pills">
     <span class="pill brand">By Nzualo</span>
     <a class="whatsapp" href="{whatsapp_link}" target="_blank" rel="noopener noreferrer">WhatsApp</a>
+    <span class="pill">{'Relógio pausado' if st.session_state['pause_refresh'] else 'Relógio ativo'}</span>
   </div>
 </div>
 """,
@@ -651,6 +669,8 @@ def main():
         min_odd = st.number_input("Odd mínima (normais)", value=1.30, min_value=1.01, step=0.01)
         zebra_min_odd = st.number_input("Odd mínima (zebras)", value=4.00, min_value=2.00, step=0.10)
 
+        st.caption("Para relógio contínuo: adicione 'streamlit-autorefresh' ao requirements.txt.")
+
     # fixtures today
     date_to_use = now_local.date()
     fixtures = get_fixtures_by_date(date_to_use.strftime("%Y-%m-%d"))
@@ -670,31 +690,59 @@ def main():
     st.caption(f"Data analisada: {date_to_use.strftime('%d/%m/%Y')} | Jogos após limite de ligas: {len(fixtures)}")
 
     # =============================
-    # DEBUG ODDS SECTION (THIS IS WHAT YOU WANTED)
+    # DEBUG ODDS (persistente)
     # =============================
     with st.expander("🛠️ Debug: TESTAR ODDS (clique aqui)", expanded=False):
         st.write("Isto mostra o JSON real que a sua conta está a receber no endpoint /odds.")
-        if st.button("TESTAR ODDS AGORA"):
-            fx0 = fixtures[0]
-            fid = int(fx0["fixture"]["id"])
-            st.write("Fixture ID:", fid)
-            resp = get_odds_for_fixture(fid, bookmaker=bookmaker)
-            st.write("Resposta bruta (/odds -> response[0]):")
-            st.json(resp[:1] if isinstance(resp, list) else resp)
+        colA, colB = st.columns([1, 1])
 
-            st.write("Resumo (nomes de mercados e selections):")
-            st.json(summarize_odds_names(resp))
+        with colA:
+            if st.button("TESTAR ODDS AGORA", key="btn_test_odds"):
+                st.session_state["pause_refresh"] = True  # evita 'piscar'
 
-            st.write("Teste rápido de extração (1X2 / BTTS / Over):")
-            st.json({
-                "1X2 Home": _extract_market_odds(resp, ["match winner"], ["home"]),
-                "1X2 Draw": _extract_market_odds(resp, ["match winner"], ["draw"]),
-                "1X2 Away": _extract_market_odds(resp, ["match winner"], ["away"]),
-                "BTTS Yes": _extract_market_odds(resp, ["both teams score"], ["yes"]),
-                "Over 1.5": _extract_market_odds(resp, ["goals over/under"], ["over 1.5"]),
-                "Over 2.5": _extract_market_odds(resp, ["goals over/under"], ["over 2.5"]),
-                "DC 1X": _extract_market_odds(resp, ["double chance"], ["home/draw"]) or _extract_market_odds(resp, ["double chance"], ["1x"]),
-            })
+                try:
+                    fx0 = fixtures[0]
+                    fid = int(fx0["fixture"]["id"])
+                    resp = get_odds_for_fixture(fid, bookmaker=bookmaker)
+
+                    st.session_state["debug_odds_raw"] = {
+                        "fixture_id": fid,
+                        "response_len": (len(resp) if isinstance(resp, list) else None),
+                        "response_preview": (resp[:1] if isinstance(resp, list) else resp),
+                    }
+                    st.session_state["debug_odds_summary"] = summarize_odds_names(resp)
+                    st.session_state["debug_extract_test"] = {
+                        "1X2 Home": _extract_market_odds(resp, ["match winner"], ["home"]),
+                        "1X2 Draw": _extract_market_odds(resp, ["match winner"], ["draw"]),
+                        "1X2 Away": _extract_market_odds(resp, ["match winner"], ["away"]),
+                        "BTTS Yes": _extract_market_odds(resp, ["both teams score"], ["yes"]),
+                        "Over 1.5": _extract_market_odds(resp, ["goals over/under"], ["over 1.5"]),
+                        "Over 2.5": _extract_market_odds(resp, ["goals over/under"], ["over 2.5"]),
+                        "DC 1X": _extract_market_odds(resp, ["double chance"], ["home/draw"]) or _extract_market_odds(resp, ["double chance"], ["1x"]),
+                    }
+
+                except Exception as e:
+                    st.session_state["debug_odds_raw"] = {"error": str(e)}
+                    st.session_state["debug_odds_summary"] = None
+                    st.session_state["debug_extract_test"] = None
+
+        with colB:
+            if st.button("RETOMAR RELÓGIO", key="btn_resume_clock"):
+                st.session_state["pause_refresh"] = False
+
+        st.markdown("<div class='debugbox'>", unsafe_allow_html=True)
+        if st.session_state["debug_odds_raw"] is None:
+            st.info("Clique em 'TESTAR ODDS AGORA' para ver o JSON. O relógio será pausado automaticamente.")
+        else:
+            st.subheader("Resultado do Debug")
+            st.json(st.session_state["debug_odds_raw"])
+
+            st.subheader("Resumo (bookmakers / mercados / selections)")
+            st.json(st.session_state["debug_odds_summary"])
+
+            st.subheader("Teste de extração (keywords atuais)")
+            st.json(st.session_state["debug_extract_test"])
+        st.markdown("</div>", unsafe_allow_html=True)
 
     # tabs
     tabs = st.tabs(["🏆 1X2", "⚽ BTTS", "📈 Over 1.5", "📈 Over 2.5", "👥 DC+O1.5", "👥 DC+O2.5", "🟣 Zebras"])
@@ -707,6 +755,9 @@ def main():
             col1, col2 = st.columns([1, 2])
             with col1:
                 if st.button(f"Gerar Top {max_picks}", key=f"btn_{market}"):
+                    # também pausa o relógio durante cálculo (melhora UX no mobile)
+                    st.session_state["pause_refresh"] = True
+
                     progress_placeholder = st.empty()
                     text_placeholder = st.empty()
                     bar = progress_placeholder.progress(0)
@@ -733,6 +784,10 @@ def main():
                     )
                     st.session_state[f"picks_{market}"] = picks
                     text_placeholder.write("Concluído.")
+
+                    # mantém pausado até você clicar "RETOMAR RELÓGIO"
+                    # (se quiser auto-retomar, troque para False aqui)
+                    # st.session_state["pause_refresh"] = False
 
             with col2:
                 st.write(
