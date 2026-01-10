@@ -3,6 +3,7 @@ import json
 import os
 import hashlib
 import threading
+import io
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -10,6 +11,9 @@ import pytz
 import requests
 import streamlit as st
 from openai import OpenAI
+
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
 
 # ============================================================
 # SECRETS (Streamlit Cloud -> Manage app -> Settings -> Secrets)
@@ -135,19 +139,13 @@ def _safe_save_limits(data: Dict) -> None:
             json.dump(data, f, ensure_ascii=False)
         os.replace(tmp, LIMITS_FILE)
     except Exception:
-        # se falhar, não derruba o app
         pass
 
 
 def _fingerprint() -> str:
-    """
-    Identificador leve do utilizador (sem IP).
-    Em Streamlit Cloud, headers podem variar; isto é best-effort.
-    """
     ua = ""
     lang = ""
     try:
-        # Streamlit recente: st.context.headers
         headers = getattr(st, "context", None)
         if headers and hasattr(headers, "headers"):
             h = headers.headers
@@ -158,7 +156,6 @@ def _fingerprint() -> str:
 
     seed = (ua + "|" + lang).strip()
     if not seed:
-        # fallback: usa session_id da própria sessão
         seed = "sess|" + str(st.session_state.get("_sid_fallback", ""))
         if seed.endswith("|"):
             seed += "x"
@@ -211,7 +208,6 @@ def consume_generate_chance() -> None:
             data[day] = {}
         cur = int(data[day].get(fp, 0))
         data[day][fp] = cur + 1
-        # limpeza simples: mantém só últimos 10 dias para não crescer
         try:
             days_sorted = sorted(data.keys())
             if len(days_sorted) > 10:
@@ -268,7 +264,6 @@ Pick: {pick_name}
 
 Modelo: Prob={prob:.3f} | Odd={odd:.2f} | Odd justa={fair:.2f} | Edge={edge_txt} | Evidência={ev} | λ={lam_h:.2f}-{lam_a:.2f}
 """
-
     try:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -281,6 +276,140 @@ Modelo: Prob={prob:.3f} | Odd={odd:.2f} | Odd justa={fair:.2f} | Edge={edge_txt}
         return _short(resp.choices[0].message.content or "", 700)
     except Exception:
         return "IA indisponível no momento para este pick."
+
+
+# D1 — IA: quando NÃO apostar (alerta de risco)
+@st.cache_data(ttl=60 * 60 * 24)
+def ai_risk_note_cached(
+    league: str,
+    match: str,
+    market: str,
+    pick_name: str,
+    time_str: str,
+    prob: float,
+    odd: float,
+    fair: float,
+    edge: Optional[float],
+    ev: str,
+    lam_h: float,
+    lam_a: float,
+) -> str:
+    client = get_openai_client()
+    edge_txt = "n/a" if edge is None else f"{edge*100:.1f}%"
+
+    prompt = f"""
+Você é um analista de risco para apostas. Dê um alerta curto sobre quando NÃO apostar neste pick.
+
+Regras:
+- 3 a 6 linhas, direto e prático.
+- Use APENAS os dados fornecidos (não invente lesões, escalação, notícias).
+- Liste 2 a 4 “red flags”.
+- Termine com: "Se ainda apostar: stake baixa."
+
+Pick:
+Jogo: {match}
+Liga: {league}
+Hora: {time_str}
+Mercado: {market}
+Pick: {pick_name}
+
+Dados do modelo: Prob={prob:.3f} | Odd={odd:.2f} | Odd justa={fair:.2f} | Edge={edge_txt} | Evidência={ev} | λ={lam_h:.2f}-{lam_a:.2f}
+"""
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Responda em português, sem enrolar."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.4,
+        )
+        return _short(resp.choices[0].message.content or "", 700)
+    except Exception:
+        return "IA indisponível no momento para alertas de risco."
+
+
+# =============================
+# D3 — Export Top Tips (PDF + texto WhatsApp)
+# =============================
+def top_tips_to_pdf_bytes(
+    picks: List[Dict],
+    date_str: str,
+    location: str = "Inhassoro",
+    author: str = "By Nzualo",
+) -> bytes:
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    w, h = A4
+
+    y = h - 50
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(40, y, "Top Tips do Dia")
+    y -= 18
+
+    c.setFont("Helvetica", 10)
+    c.drawString(40, y, f"Data: {date_str}   |   Local: {location}   |   {author}")
+    y -= 14
+    c.setFont("Helvetica", 9)
+    c.drawString(40, y, "Nota: Probabilidades estatísticas, sem garantias. Aposte com responsabilidade.")
+    y -= 22
+
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(40, y, "Hora")
+    c.drawString(90, y, "Liga")
+    c.drawString(260, y, "Jogo")
+    c.drawString(470, y, "Pick (Odd)")
+    y -= 12
+
+    c.setLineWidth(0.3)
+    c.line(40, y, w - 40, y)
+    y -= 14
+
+    c.setFont("Helvetica", 9)
+
+    def _short_local(s: str, n: int) -> str:
+        s = (s or "").strip()
+        return s if len(s) <= n else s[: n - 3] + "..."
+
+    for p in picks:
+        if y < 80:
+            c.showPage()
+            y = h - 50
+            c.setFont("Helvetica", 9)
+
+        time_ = p.get("time", "??:??")
+        league = _short_local(p.get("league", ""), 26)
+        match = _short_local(p.get("match", ""), 34)
+        pick = _short_local(p.get("pick", ""), 26)
+        odd = float(p.get("odd") or 0.0)
+
+        c.drawString(40, y, str(time_))
+        c.drawString(90, y, str(league))
+        c.drawString(260, y, str(match))
+        c.drawString(470, y, f"{pick} ({odd:.2f})")
+        y -= 14
+
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(40, 50, "WhatsApp: +258867926665")
+    c.save()
+
+    buf.seek(0)
+    return buf.read()
+
+
+def top_tips_whatsapp_text(picks: List[Dict], date_str: str) -> str:
+    lines = []
+    lines.append(f"Top Tips do Dia — {date_str}")
+    lines.append("Local: Inhassoro")
+    lines.append("")
+    for i, p in enumerate(picks, start=1):
+        lines.append(
+            f"{i}) {p.get('time','??:??')} | {p.get('league','Liga')} | {p.get('match','Jogo')} | {p.get('pick','Pick')} @ {float(p.get('odd') or 0):.2f}"
+        )
+    lines.append("")
+    lines.append("Nota: probabilidades, sem garantias. Aposte com responsabilidade.")
+    lines.append("By Nzualo")
+    return "\n".join(lines)
 
 
 # =============================
@@ -823,7 +952,7 @@ def build_picks_for_market(
     return picks
 
 
-def render_picks(picks: List[Dict], ai_enabled: bool, ai_max: int):
+def render_picks(picks: List[Dict], ai_enabled: bool, ai_risk_enabled: bool, ai_max: int):
     if not picks:
         st.info("Sem picks que passem nos filtros (ou odds indisponíveis).")
         return
@@ -849,6 +978,7 @@ def render_picks(picks: List[Dict], ai_enabled: bool, ai_max: int):
         )
 
         if ai_enabled:
+            # Explicação (conta para o limite)
             if ai_count < ai_max:
                 with st.expander("🧠 IA: Por que este pick? (explicação curta)"):
                     with st.spinner("A gerar explicação da IA..."):
@@ -869,7 +999,31 @@ def render_picks(picks: List[Dict], ai_enabled: bool, ai_max: int):
                     st.markdown(f"<div class='ai-box'>{txt}</div>", unsafe_allow_html=True)
                 ai_count += 1
             else:
-                st.markdown("<div class='small'>IA: limite de explicações desta aba atingido.</div>", unsafe_allow_html=True)
+                st.markdown("<div class='small'>IA: limite de explicações/alertas desta aba atingido.</div>", unsafe_allow_html=True)
+
+            # D1: Alertas de risco (quando NÃO apostar) — também conta no limite
+            if ai_risk_enabled:
+                if ai_count < ai_max:
+                    with st.expander("🛑 IA: Quando NÃO apostar (alerta de risco)"):
+                        with st.spinner("A gerar alertas de risco..."):
+                            risk = ai_risk_note_cached(
+                                league=p["league"],
+                                match=p["match"],
+                                market=p.get("market", ""),
+                                pick_name=p["pick"],
+                                time_str=p["time"],
+                                prob=float(p["prob"]),
+                                odd=float(p["odd"]),
+                                fair=float(p["fair"]),
+                                edge=p.get("edge"),
+                                ev=p.get("ev", ""),
+                                lam_h=float(p["lam"][0]),
+                                lam_a=float(p["lam"][1]),
+                            )
+                        st.markdown(f"<div class='ai-box'>{risk}</div>", unsafe_allow_html=True)
+                    ai_count += 1
+                else:
+                    st.markdown("<div class='small'>IA: limite de explicações/alertas desta aba atingido.</div>", unsafe_allow_html=True)
 
 
 # =============================
@@ -932,12 +1086,17 @@ def build_top_tips(
 
     final: List[Dict] = []
     used_leagues = set()
+    used_fixtures = set()
     for c in all_candidates:
         lid = c.get("league_id")
+        fid = c.get("fixture_id")
         if lid in used_leagues:
+            continue
+        if fid in used_fixtures:
             continue
         final.append(c)
         used_leagues.add(lid)
+        used_fixtures.add(fid)
         if len(final) >= top_n:
             break
 
@@ -1034,10 +1193,16 @@ def main():
             ai_enabled = False
             st.info("IA é recurso Premium.")
 
-        ai_max = st.slider("Máx. explicações por aba", 1, 10, 5, 1)
+        # D1 toggle (somente Premium)
+        ai_risk_enabled = st.checkbox("IA: Alertas de risco (quando NÃO apostar)", value=True)
+        if not is_premium() and ai_risk_enabled:
+            ai_risk_enabled = False
+            st.info("Alertas de risco (IA) é recurso Premium.")
+
+        ai_max = st.slider("Máx. explicações/alertas por aba", 1, 12, 6, 1)
 
         ai_ok = True
-        if ai_enabled and not st.secrets.get("OPENAI_API_KEY"):
+        if (ai_enabled or ai_risk_enabled) and not st.secrets.get("OPENAI_API_KEY"):
             ai_ok = False
             st.warning("IA ativada, mas falta OPENAI_API_KEY nos Secrets.")
 
@@ -1099,7 +1264,32 @@ def main():
         if disabled and not is_premium():
             st.warning("Limite FREE diário atingido (3 gerações hoje). Ative Premium para ilimitado.")
 
-        render_picks(st.session_state.get("toptips", []), ai_enabled=ai_enabled and ai_ok, ai_max=ai_max)
+        tips_list = st.session_state.get("toptips", [])
+
+        # D3: Exportar Top Tips (PDF + texto WhatsApp)
+        if tips_list:
+            st.markdown("### 📤 Exportar Top Tips")
+            colA, colB = st.columns([1, 1])
+
+            with colA:
+                pdf_bytes = top_tips_to_pdf_bytes(
+                    picks=tips_list,
+                    date_str=date_to_use.strftime("%d/%m/%Y"),
+                    location="Inhassoro",
+                    author="By Nzualo",
+                )
+                st.download_button(
+                    label="📄 Baixar Top Tips em PDF",
+                    data=pdf_bytes,
+                    file_name=f"top_tips_{date_to_use.strftime('%Y-%m-%d')}.pdf",
+                    mime="application/pdf",
+                )
+
+            with colB:
+                wa_text = top_tips_whatsapp_text(tips_list, date_to_use.strftime("%d/%m/%Y"))
+                st.text_area("Texto pronto para WhatsApp (copiar e colar)", value=wa_text, height=190)
+
+        render_picks(tips_list, ai_enabled=(ai_enabled and ai_ok), ai_risk_enabled=(ai_risk_enabled and ai_ok), ai_max=ai_max)
 
     markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5", "Zebras"]
     for tab, market in zip(tabs[1:], markets):
@@ -1144,7 +1334,12 @@ def main():
                 else:
                     st.write(f"Free: restantes hoje: {free_remaining_today()}/{FREE_MAX_GENERATES_PER_DAY}.")
 
-            render_picks(st.session_state.get(f"picks_{market}", []), ai_enabled=ai_enabled and ai_ok, ai_max=ai_max)
+            render_picks(
+                st.session_state.get(f"picks_{market}", []),
+                ai_enabled=(ai_enabled and ai_ok),
+                ai_risk_enabled=(ai_risk_enabled and ai_ok),
+                ai_max=ai_max
+            )
 
 
 if __name__ == "__main__":
