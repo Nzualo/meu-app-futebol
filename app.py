@@ -5,6 +5,15 @@ from typing import Dict, List, Optional, Tuple
 import pytz
 import requests
 import streamlit as st
+from openai import OpenAI
+
+# ============================================================
+# SECRETS (Streamlit Cloud -> Settings -> Secrets)
+# ============================================================
+# ALLSPORTS_API_KEY = "SUA_CHAVE_AQUI"
+# FOOTBALL_API_MODE = "allsports"   # manter assim para este app
+# OPENAI_API_KEY    = "SUA_CHAVE_OPENAI_AQUI"
+# ============================================================
 
 # =============================
 # CONFIG
@@ -50,6 +59,8 @@ st.markdown(
 }
 .barca-wa:hover { background:#1ebe5d; }
 .ptext { color: #cfd8e3; font-size: 0.90rem; margin-top: 6px; }
+.ai-box { border-left: 4px solid #ffd166; padding-left: 10px; margin-top: 8px; color: #f3f4f6; }
+.small { font-size: 0.88rem; color: #cfd8e3; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -66,6 +77,80 @@ def _get_secret(name: str, default: Optional[str] = None) -> str:
 
 def provider_mode() -> str:
     return str(st.secrets.get("FOOTBALL_API_MODE", "allsports")).lower().strip()
+
+# =============================
+# OpenAI (Passo 3)
+# =============================
+@st.cache_resource
+def get_openai_client() -> OpenAI:
+    # Só inicializa se a chave existir
+    key = st.secrets.get("OPENAI_API_KEY")
+    if not key:
+        raise RuntimeError("Missing secret: OPENAI_API_KEY")
+    return OpenAI(api_key=str(key))
+
+def _short(s: str, n: int = 600) -> str:
+    s = (s or "").strip()
+    return s if len(s) <= n else s[: n - 3] + "..."
+
+@st.cache_data(ttl=60 * 60 * 24)
+def ai_explain_pick_cached(
+    league: str,
+    match: str,
+    market: str,
+    pick_name: str,
+    time_str: str,
+    prob: float,
+    odd: float,
+    fair: float,
+    edge: Optional[float],
+    ev: str,
+    lam_h: float,
+    lam_a: float,
+) -> str:
+    """
+    Cache por 24h para reduzir custo. A chave do cache é o conjunto de argumentos.
+    """
+    client = get_openai_client()
+
+    edge_txt = "n/a" if edge is None else f"{edge*100:.1f}%"
+    prompt = f"""
+Você é um analista profissional de apostas esportivas. Explique de forma curta, objetiva e útil o pick abaixo.
+Regras:
+- 4 a 7 linhas no máximo.
+- Linguagem simples.
+- Não invente dados externos.
+- Inclua 1 frase de risco (ex.: “principal risco: ...”).
+- Conclua com uma confiança estimada em % (não mais que 90%).
+
+Jogo: {match}
+Liga: {league}
+Hora: {time_str}
+Mercado: {market}
+Pick: {pick_name}
+
+Modelo:
+- Probabilidade: {prob:.3f}
+- Odd mercado: {odd:.2f}
+- Odd justa: {fair:.2f}
+- Edge: {edge_txt}
+- Evidência (quantidade/qualidade de jogos FT usados): {ev}
+- Lambdas estimados: λ_home={lam_h:.2f}, λ_away={lam_a:.2f}
+"""
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Responda sempre em português e seja muito conciso e prático."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.4,
+        )
+        txt = resp.choices[0].message.content or ""
+        return _short(txt, 700)
+    except Exception:
+        return "IA indisponível no momento para este pick."
 
 # =============================
 # AllSportsAPI low-level
@@ -127,7 +212,6 @@ def _parse_score_pair(s: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
 
 def _extract_ft_goals_from_raw(ev: Dict) -> Tuple[Optional[int], Optional[int]]:
     """
-    Robusto: tenta vários campos comuns do AllSports.
     Prioridade (melhor para FT):
       1) event_ft_result
       2) event_final_result
@@ -171,7 +255,6 @@ def _normalize_fixture_allsports(ev: Dict) -> Optional[Dict]:
         else:
             short = ev.get("event_status") or "NS"
 
-        # extrai gols FT reais (quando existirem)
         gh, ga = _extract_ft_goals_from_raw(ev)
 
         return {
@@ -233,7 +316,6 @@ def get_last_team_fixtures(team_id: int, last: int = 10, status: str = "FT") -> 
         st_short = (fx.get("fixture", {}).get("status", {}) or {}).get("short", "")
         if status == "FT" and st_short != "FT":
             continue
-        # só usa jogos com placar válido
         if fx.get("goals", {}).get("home") is None or fx.get("goals", {}).get("away") is None:
             continue
         norm.append(fx)
@@ -325,7 +407,7 @@ def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 # =============================
-# Forma ponderada por recência (Passo 2: rápido e seguro)
+# Forma ponderada por recência
 # =============================
 def compute_team_form_weighted(
     team_id: int,
@@ -351,7 +433,7 @@ def compute_team_form_weighted(
             if gh is None or ga is None:
                 continue
 
-            w = decay ** i  # mais recente (i=0) tem peso 1.0
+            w = decay ** i
 
             if team_id == home_id:
                 _gf, _ga = int(gh), int(ga)
@@ -627,13 +709,18 @@ def build_picks_for_market(
 
     return picks
 
-def render_picks(picks: List[Dict]):
+def render_picks(picks: List[Dict], ai_enabled: bool, ai_max: int):
     if not picks:
         st.info("Sem picks que passem nos filtros (ou odds indisponíveis).")
         return
+
+    # limita quantas explicações de IA por aba (para custo/performance)
+    ai_count = 0
+
     for p in picks:
         edge = p.get("edge")
         edge_txt = f"{edge*100:.1f}%" if edge is not None else "n/a"
+
         st.markdown(
             f"""
 <div class="card">
@@ -648,6 +735,29 @@ def render_picks(picks: List[Dict]):
 """,
             unsafe_allow_html=True,
         )
+
+        if ai_enabled:
+            if ai_count < ai_max:
+                with st.expander("🧠 IA: Por que este pick? (explicação curta)"):
+                    with st.spinner("A gerar explicação da IA..."):
+                        txt = ai_explain_pick_cached(
+                            league=p["league"],
+                            match=p["match"],
+                            market=p.get("market", ""),
+                            pick_name=p["pick"],
+                            time_str=p["time"],
+                            prob=float(p["prob"]),
+                            odd=float(p["odd"]),
+                            fair=float(p["fair"]),
+                            edge=p.get("edge"),
+                            ev=p.get("ev", ""),
+                            lam_h=float(p["lam"][0]),
+                            lam_a=float(p["lam"][1]),
+                        )
+                    st.markdown(f"<div class='ai-box'>{txt}</div>", unsafe_allow_html=True)
+                ai_count += 1
+            else:
+                st.markdown("<div class='small'>IA: limite de explicações desta aba atingido (para economizar). Ajuste no sidebar.</div>", unsafe_allow_html=True)
 
 # =============================
 # TOP TIPS (6-10 juntos)
@@ -695,6 +805,7 @@ def build_top_tips(
         ),
     )
 
+    # 1 tip por liga
     final: List[Dict] = []
     used_leagues = set()
     for c in all_candidates:
@@ -756,6 +867,15 @@ def main():
         min_odd = st.number_input("Odd mínima (normais)", value=1.30, min_value=1.01, step=0.01)
         zebra_min_odd = st.number_input("Odd mínima (zebras)", value=4.00, min_value=2.00, step=0.10)
 
+        st.divider()
+        st.subheader("IA (Passo 3)")
+        ai_enabled = st.checkbox("Ativar IA para explicar picks", value=True)
+        ai_max = st.slider("Máx. explicações por aba", 1, 10, 5, 1)
+        ai_warn = ""
+        if ai_enabled and not st.secrets.get("OPENAI_API_KEY"):
+            ai_warn = "IA ativada, mas falta OPENAI_API_KEY nos Secrets."
+            st.warning(ai_warn)
+
         debug = st.checkbox("Mostrar diagnóstico (debug)", value=False)
 
     date_to_use = now_local.date()
@@ -778,11 +898,9 @@ def main():
             st.write("Fixtures brutos:", len(fixtures_raw))
             st.write("Fixtures após filtro:", len(fixtures))
             if fixtures_raw:
-                st.write("Exemplo FT raw keys:", list((fixtures_raw[0].get("_raw") or {}).keys())[:20])
-                st.write("Exemplo placar raw (do dia pode ser '-'):",
-                         (fixtures_raw[0].get("_raw") or {}).get("event_final_result"))
+                st.write("Exemplo placar raw (dia):", (fixtures_raw[0].get("_raw") or {}).get("event_final_result"))
 
-            # Mostra histórico FT real para confirmar que a forma está a funcionar
+            # Debug do histórico FT (o que interessa)
             if fixtures:
                 fx0 = fixtures[0]
                 hid = fx0["teams"]["home"]["id"]
@@ -827,7 +945,8 @@ def main():
                 top_n=top_tips_n,
             )
             st.session_state["toptips"] = tips
-        render_picks(st.session_state.get("toptips", []))
+
+        render_picks(st.session_state.get("toptips", []), ai_enabled=ai_enabled and not bool(ai_warn), ai_max=ai_max)
 
     # ===== Outras abas =====
     markets = ["1X2", "BTTS", "Over 1.5", "Over 2.5", "DC+Over1.5", "DC+Over2.5", "Zebras"]
@@ -854,7 +973,8 @@ def main():
                         st.session_state["_show_progress"] = False
             with col2:
                 st.write("Critérios: odds mínimas + ranking por edge. Se não aparecer pick, pode faltar odds no AllSports.")
-            render_picks(st.session_state.get(f"picks_{market}", []))
+
+            render_picks(st.session_state.get(f"picks_{market}", []), ai_enabled=ai_enabled and not bool(ai_warn), ai_max=ai_max)
 
 if __name__ == "__main__":
     main()
